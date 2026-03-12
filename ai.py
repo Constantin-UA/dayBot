@@ -4,17 +4,12 @@ import logging
 from config import ai_model
 
 async def fetch_news(symbol: str = "ETH") -> str:
-    # Добавляем теги для новых активов
-    tags = {
-        "BTC": "bitcoin", 
-        "ETH": "ethereum", 
-        "SOL": "solana",
-        "BNB": "binance-coin",
-        "XRP": "ripple",
-        "ADA": "cardano"
-    } 
+    """
+    Изолируем сетевой запрос. Новости дают макро-контекст, 
+    который может сломать любой интрадей-паттерн.
+    """
+    tags = {"ETH": "ethereum", "BTC": "bitcoin"}
     tag = tags.get(symbol, "cryptocurrency")
-    
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(f'https://cointelegraph.com/rss/tag/{tag}', timeout=5) as response:
@@ -24,59 +19,48 @@ async def fetch_news(symbol: str = "ETH") -> str:
                 return "\n".join(news)
     except Exception as e:
         logging.error(f"Ошибка парсинга новостей: {e}")
-        return "Не вдалося отримати свіжі новини."
+        return "Нет свежих новостей."
 
-async def fetch_fear_and_greed() -> str:
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get('https://api.alternative.me/fng/?limit=1', timeout=5) as response:
-                data = await response.json()
-                return f"{data['data'][0]['value']}/100 ({data['data'][0]['value_classification']})"
-    except Exception as e:
-        logging.error(f"Ошибка получения Fear & Greed: {e}")
-        return "Невідомо"
-
-async def get_ai_forecast(symbol, price, daily_low, daily_high, position_pct, rsi_1d, macd_hist, guide_macd_hist, guide_name, fng_index, news, funding_rate, ema50, cur_vol, avg_vol, poc_price, fibo_618, risk_usd, long_sl, long_amount, long_tp, short_sl, short_amount, short_tp):
-    trend_50 = "ВИЩЕ (Глобальний бичачий тренд)" if price > ema50 else "НИЖЧЕ (Глобальний ведмежий тренд)"
-    vol_status = "АНОМАЛЬНИЙ РІСТ" if cur_vol > avg_vol * 1.5 else ("ПАДАЮТЬ" if cur_vol < avg_vol * 0.8 else "В межах норми")
+async def get_ai_forecast(symbol: str, price: float, current_vwap: float, vwap_distance_pct: float, 
+                          rsi_15m: float, macd_hist: float, guide_macd_hist: float, guide_name: str, 
+                          news: str, funding_rate: float, cur_vol: float, avg_vol: float) -> str:
+    """
+    Формирует промпт для интрадей-анализа.
+    Почему VWAP: это институциональный якорь. ШИ должен понимать, насколько цена отклонилась от справедливой.
+    """
+    vol_status = "АНОМАЛЬНЫЙ РОСТ" if cur_vol > avg_vol * 1.5 else ("ПАДАЮТ" if cur_vol < avg_vol * 0.8 else "В пределах нормы")
 
     prompt = f"""
-    Ти — алгоритмічний ризик-менеджер та Chief AI Architect. Твоя спеціалізація — СВІНГ-ТРЕЙДИНГ (утримання 1-3 дні).
-    Твоє завдання — провести детермінований аналіз ринкової ситуації та видати чіткий Торговий План.
+    Ты — алгоритмический HFT-аналитик и Intraday-трейдер. Твоя специализация — ДЕЙТРЕЙДИНГ (сделки от 15 минут до 3 часов).
+    Твоя задача — провести детерминированный анализ рыночной микроструктуры и выдать четкий вердикт.
 
-    ДАНІ РИНКУ (АКТИВ: {symbol}/USDT):
-    - Поточна ціна: {price:.2f}
-    - Глобальний тренд (vs EMA 50): Ціна {trend_50}
-    - Денний коридор ATR: Підтримка {daily_low:.2f} | Опір {daily_high:.2f}
-    - Позиція ціни в коридорі: {position_pct:.1f}% (0% = на підтримці, 100% = на опорі, 50% = рівно посередині)
-    - Об'ємний кластер POC (Point of Control 30d): {poc_price:.2f}
-    - Рівень Фібоначчі 0.618: {fibo_618:.2f}
-    - Локальний імпульс (MACD 4H): {'Бичачий (Вгору)' if macd_hist > 0 else 'Ведмежий (Вниз)'}
-    - Макро-поводир ({guide_name}): {'Зростає (Підтримка лонгів)' if guide_macd_hist > 0 else 'Падає (Тиск вниз)'}
+    ДАННЫЕ РЫНКА (АКТИВ: {symbol}/USDT, ТАЙМФРЕЙМ: 15m):
+    - Текущая цена: {price:.2f}
+    - Институциональный якорь (VWAP): {current_vwap:.2f}
+    - Отклонение цены от VWAP: {vwap_distance_pct:.2f}% (Положительное = перегрев вверх, Отрицательное = падение ниже средневзвешенной цены)
+    - RSI (15m): {rsi_15m:.1f}
+    - Локальный импульс (MACD 15m): {'Бычий (Вверх)' if macd_hist > 0 else 'Медвежий (Вниз)'}
+    - Объемы торгов (относительно 10 свечей): {vol_status}
+    - Ставка финансирования (Funding): {funding_rate * 100:.4f}%
+    - Поводырь ({guide_name}): {'Растет' if guide_macd_hist > 0 else 'Падает'}
     
-    ФІНАНСОВА МАТЕМАТИКА (Твій фіксований ризик на угоду складає: ${risk_usd:.2f}):
-    - Якщо ти обираєш ЛОНГ: Безпечний Stop-Loss знаходиться на рівні {long_sl:.2f}. Об'єм позиції для суворого дотримання ризику: {long_amount:.4f} {symbol}. Ціль: {long_tp:.2f}.
-    - Якщо ти обираєш ШОРТ: Безпечний Stop-Loss знаходиться на рівні {short_sl:.2f}. Об'єм позиції для суворого дотримання ризику: {short_amount:.4f} {symbol}. Ціль: {short_tp:.2f}.
+    СВЕЖИЕ НОВОСТИ:
+    {news}
     
-    СУВОРИЙ АЛГОРИТМ МІРКУВАНЬ:
-    1. Оціни Позицію ціни в коридорі ({position_pct:.1f}%). Якщо значення між 30% та 70%, ризик відкриття позиції максимальний — торговий план скасовується (ПОЗА РИНКОМ).
-    2. Зістав межі ATR, POC та Фібоначчі для підтвердження безпеки входу.
+    СТРОГИЙ АЛГОРИТМ РАССУЖДЕНИЙ (Chain of Thought):
+    1. [Анализ Отклонения]: Оцени Отклонение от VWAP ({vwap_distance_pct:.2f}%). Если оно около 0%, цена в равновесии (опасность флэта). Если > 1.5% или < -1.5%, вероятен институциональный возврат к средней (Mean Reversion).
+    2. [Аналіз Ліквідності]: Оцени Funding и RSI 15m. Есть ли локальный перегрев толпы на 15-минутном таймфрейме?
+    3. [Синтез]: Сопоставь Отклонение VWAP, Поводыря и Объемы для поиска безопасной точки входа.
     
-    ФОРМАТ ВІДПОВІДІ:
-    **🔍 [Аналіз Ліквідності та Трендів]**: (2-3 речення)
-    **💡 Свінг-вердикт**: (ЛОНГ / ШОРТ / ПОЗА РИНКОМ)
-    
-    **🎯 Торговий План**:
-    (Якщо вердикт ПОЗА РИНКОМ, напиши тут: "Немає безпечного математичного плану для входу. Очікування кращого Risk/Reward.")
-    (Якщо ЛОНГ або ШОРТ, скопіюй дані з блоку Фінансова Математика у такому вигляді):
-    - 🛡 Вхід: [Поточна ціна]
-    - ⚖️ Об'єм позиції: [Об'єм з математики] {symbol} (Ризик суворо ${risk_usd:.2f})
-    - 🛑 Stop-Loss: [SL з математики]
-    - 🏁 Take-Profit: [Ціль з математики]
+    ФОРМАТ ОТВЕТА:
+    **🔍 [Анализ Микроструктуры]**: (2-3 предложения)
+    **⚖️ [Синтез факторов]**: (2-3 предложения)
+    **💡 Intraday-вердикт (15m - 3h)**: (ЛОНГ / ШОРТ / ВНЕ РЫНКА (Ждать отката к VWAP)).
     """
     try:
+        # Низкая температура для устранения креативных галлюцинаций в строгой математике
         response = await ai_model.generate_content_async(prompt, generation_config={"temperature": 0.1})
         return response.text
     except Exception as e:
         logging.error(f"Ошибка Gemini API: {e}")
-        return "Нейромережа зараз недоступна."
+        return "Нейросеть сейчас недоступна."
