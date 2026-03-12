@@ -1,0 +1,10 @@
+aiogram==3.17.0
+ccxt
+pandas
+pandas-ta
+mplfinance
+google-generativeai
+aiohttp
+python-dotenv
+apscheduler
+yfinance
