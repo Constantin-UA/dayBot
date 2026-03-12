@@ -12,7 +12,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # --- НАЛАШТУВАННЯ РИЗИК-МЕНЕДЖМЕНТУ ---
 TRADE_DEPOSIT = float(os.getenv("TRADE_DEPOSIT", 1000)) # Ваш депозит у доларах
-TRADE_RISK_PCT = float(os.getenv("TRADE_RISK_PCT", 10))  # Ризик на угоду у відсотках (1%)
+TRADE_RISK_PCT = float(os.getenv("TRADE_RISK_PCT", 20))  # Ризик на угоду у відсотках (1%)
 # ---------------------------------------
 
 if not all([BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, GEMINI_API_KEY]):
