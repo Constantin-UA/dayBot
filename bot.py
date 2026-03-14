@@ -62,7 +62,6 @@ async def market_handler(call: CallbackQuery):
     if data[0] is None:
         return await call.message.edit_text("❌ Помилка отримання даних.")
 
-    # Розпакування 13 параметрів інтрадей-моделі
     price, vwap, vwap_dist_pct, rsi_15m, funding, df_15m, buy_pct, sell_pct, macd_15m, guide_macd, guide_name, cur_vol, avg_vol = data
 
     chart_buffer = create_chart(df_15m, price, vwap, symbol)
@@ -96,13 +95,17 @@ async def ai_forecast_handler(call: CallbackQuery):
 
     price, vwap, vwap_dist_pct, rsi_15m, funding, df_15m, _, _, macd_15m, guide_macd, guide_name, cur_vol, avg_vol = data
     
-    # Чому ми передаємо VWAP_ALERT_THRESHOLD: усуваємо розрив контексту. 
-    # Тепер ШІ та фоновий радар використовують єдину систему координат.
+    # --- БЛОК ІЗОЛЯЦІЇ РИЗИКУ: Розрахунок локальних екстремумів (остання 1 година = 4 свічки по 15m) ---
+    local_high = float(df_15m['high'].tail(4).max())
+    local_low = float(df_15m['low'].tail(4).min())
+    # ----------------------------------------------------------------------------------------------------
+    
     ai_text = await get_ai_forecast(
             symbol=symbol, price=price, current_vwap=vwap, vwap_distance_pct=vwap_dist_pct,
             rsi_15m=rsi_15m, macd_hist=macd_15m, guide_macd_hist=guide_macd, 
             guide_name=guide_name, news=news, funding_rate=funding, cur_vol=cur_vol, avg_vol=avg_vol,
-            vwap_threshold=VWAP_ALERT_THRESHOLD  
+            vwap_threshold=VWAP_ALERT_THRESHOLD,
+            local_high=local_high, local_low=local_low
         )
     
     await call.message.delete()
@@ -148,10 +151,7 @@ async def save_log(message: types.Message, state: FSMContext):
     await wait_msg.delete()
 
 async def check_alerts():
-    """
-    Системний фоновий чекер. Використовує динамічний поріг з конфігурації 
-    для пошуку екстремальних відхилень від VWAP.
-    """
+    """Системний фоновий чекер відхилень VWAP."""
     for symbol in ["ETH", "BTC"]:
         data = await get_market_data(symbol)
         if data[0] is None: continue
@@ -159,7 +159,6 @@ async def check_alerts():
         price, vwap, vwap_dist_pct, rsi_15m = data[0], data[1], data[2], data[3]
         alert_message, current_alert_type = None, None
 
-        # Емерджентні тригери інтрадея (застосовуємо динамічний поріг)
         if vwap_dist_pct >= VWAP_ALERT_THRESHOLD: 
             current_alert_type, alert_message = "VWAP_OVERBOUGHT", f"🚨 ПЕРЕГРІВ ({symbol}): Ціна відірвалася на {vwap_dist_pct:.2f}% вище VWAP. Готуємо ШОРТ."
         elif vwap_dist_pct <= -VWAP_ALERT_THRESHOLD: 
@@ -176,7 +175,6 @@ async def check_alerts():
             alert_state[f"last_{symbol}"] = current_alert_type
 
 async def main():
-    # В інтрадеї перевірка кожні 5 хвилин дозволяє фіксувати швидкоплинні дисбаланси
     scheduler.add_job(check_alerts, 'interval', minutes=5)
     scheduler.start()
     await bot.delete_webhook(drop_pending_updates=True) 
