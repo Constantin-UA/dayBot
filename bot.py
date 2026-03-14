@@ -152,16 +152,15 @@ async def save_log(message: types.Message, state: FSMContext):
     await wait_msg.delete()
 
 async def check_alerts():
-    """Системний фоновий чекер відхилень VWAP та шоків мікро-ліквідності."""
-    # Тепер ми проходимося по всьому масиву активів з .env
+    """Системний фоновий чекер відхилень VWAP з АВТОМАТИЧНИМ ШІ-АНАЛІЗОМ."""
     for symbol in WATCHLIST:
         data = await get_market_data(symbol)
         if data[0] is None: continue
         
-        price, vwap, vwap_dist_pct, rsi_15m, _, _, _, _, _, _, _, cur_vol, avg_vol = data
+        # Розпаковуємо всі змінні, оскільки тепер вони потрібні для ШІ
+        price, vwap, vwap_dist_pct, rsi_15m, funding, df_15m, buy_pct, sell_pct, macd_15m, guide_macd, guide_name, cur_vol, avg_vol = data
         alert_message, current_alert_type = None, None
 
-        # Детектор емерджентності (шок ліквідності)
         is_volume_anomaly = cur_vol > (avg_vol * 2.0)
         vol_tag = "⚠️ [АНОМАЛЬНИЙ ОБ'ЄМ]" if is_volume_anomaly else ""
 
@@ -180,10 +179,32 @@ async def check_alerts():
         else: 
             alert_state[f"last_{symbol}"] = None
 
-        # Відправка алерта (уникаємо спаму одного і того ж стану)
         if alert_message and current_alert_type != alert_state.get(f"last_{symbol}"):
+            # 1. Відправляємо швидкий базовий алерт
             await bot.send_message(chat_id=ADMIN_ID, text=alert_message.strip())
             alert_state[f"last_{symbol}"] = current_alert_type
+
+            # 2. АВТОМАТИЧНИЙ ШІ-АНАЛІЗ (Тільки для математичних аномалій VWAP)
+            if current_alert_type in ["VWAP_OVERBOUGHT", "VWAP_OVERSOLD"]:
+                await bot.send_message(chat_id=ADMIN_ID, text=f"🧠 Запускаю авто-аналіз мікроструктури для {symbol}...")
+                
+                local_high = float(df_15m['high'].tail(4).max())
+                local_low = float(df_15m['low'].tail(4).min())
+                news = await fetch_news(symbol)
+
+                ai_text = await get_ai_forecast(
+                    symbol=symbol, price=price, current_vwap=vwap, vwap_distance_pct=vwap_dist_pct,
+                    rsi_15m=rsi_15m, macd_hist=macd_15m, guide_macd_hist=guide_macd, 
+                    guide_name=guide_name, news=news, funding_rate=funding, cur_vol=cur_vol, avg_vol=avg_vol,
+                    vwap_threshold=VWAP_ALERT_THRESHOLD,
+                    local_high=local_high, local_low=local_low
+                )
+                
+                await bot.send_message(chat_id=ADMIN_ID, text=f"🤖 **Auto AI ({symbol}):**\n\n{ai_text}", parse_mode="Markdown")
+                
+                # 3. Балансуючий цикл: штучна пауза 3 секунди. 
+                # Захищає API Gemini від бану, якщо одночасно впали 8 монет.
+                await asyncio.sleep(3)
 
 async def main():
     scheduler.add_job(check_alerts, 'interval', minutes=5)
