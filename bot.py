@@ -5,10 +5,9 @@ from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.exceptions import TelegramBadRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, logging, VWAP_ALERT_THRESHOLD
+from config import BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, logging, VWAP_ALERT_THRESHOLD, WATCHLIST
 from market import get_market_data, create_chart
 from ai import fetch_news, get_ai_forecast
 
@@ -28,13 +27,13 @@ main_keyboard = ReplyKeyboardMarkup(
 )
 
 def get_asset_keyboard(action_prefix: str) -> InlineKeyboardMarkup:
-    """DRY: Універсальна генерація клавіатур для активів."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="ETH", callback_data=f"{action_prefix}_ETH"),
-            InlineKeyboardButton(text="BTC", callback_data=f"{action_prefix}_BTC")
-        ]
-    ])
+    """
+    DRY: Динамічна генерація клавіатури на основі Watchlist з .env.
+    Пакує кнопки по 3 в один ряд для зручності на мобільних пристроях.
+    """
+    buttons = [InlineKeyboardButton(text=coin, callback_data=f"{action_prefix}_{coin}") for coin in WATCHLIST]
+    keyboard = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
@@ -69,11 +68,15 @@ async def market_handler(call: CallbackQuery):
 
     vwap_status = "🔴 ПЕРЕГРІВ ВГОРУ" if vwap_dist_pct > VWAP_ALERT_THRESHOLD else ("🟢 ПЕРЕПРОДАНІСТЬ" if vwap_dist_pct < -VWAP_ALERT_THRESHOLD else "⚪ В зоні балансу")
     
+    # Індикатор об'єму для ручного запиту
+    vol_tag = "⚠️ АНОМАЛІЯ ОБ'ЄМУ" if cur_vol > (avg_vol * 2.0) else "Норма"
+
     text = (
         f"⚡ **VWAP Радар {symbol}/USDT (15m)**\n\n"
-        f"💰 **Ціна:** `${price:,.2f}`\n"
-        f"🧲 **VWAP:** `${vwap:,.2f}`\n"
-        f"📏 **Відхилення:** `{vwap_dist_pct:+.2f}%` ({vwap_status})\n\n"
+        f"💰 **Ціна:** `${price:,.4f}`\n"
+        f"🧲 **VWAP:** `${vwap:,.4f}`\n"
+        f"📏 **Відхилення:** `{vwap_dist_pct:+.2f}%` ({vwap_status})\n"
+        f"📊 **Об'єм:** {vol_tag}\n\n"
         f"📈 **RSI (15m):** `{rsi_15m:.1f}`\n"
         f"🧱 **Стакан:** `{buy_pct:.0f}% / {sell_pct:.0f}%`\n"
         f"🧭 **Імпульс 15m:** {symbol} `{'Вгору' if macd_15m > 0 else 'Вниз'}` | {guide_name} `{'Вгору' if guide_macd > 0 else 'Вниз'}`"
@@ -95,10 +98,8 @@ async def ai_forecast_handler(call: CallbackQuery):
 
     price, vwap, vwap_dist_pct, rsi_15m, funding, df_15m, _, _, macd_15m, guide_macd, guide_name, cur_vol, avg_vol = data
     
-    # --- БЛОК ІЗОЛЯЦІЇ РИЗИКУ: Розрахунок локальних екстремумів (остання 1 година = 4 свічки по 15m) ---
     local_high = float(df_15m['high'].tail(4).max())
     local_low = float(df_15m['low'].tail(4).min())
-    # ----------------------------------------------------------------------------------------------------
     
     ai_text = await get_ai_forecast(
             symbol=symbol, price=price, current_vwap=vwap, vwap_distance_pct=vwap_dist_pct,
@@ -143,7 +144,7 @@ async def save_log(message: types.Message, state: FSMContext):
     log_text = (
         f"📖 **INTRADAY ЖУРНАЛ ({symbol})** | `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}`\n\n"
         f"📝 **Запис:**\n_{user_note}_\n\n"
-        f"💰 Ціна: `${price:,.2f}` | VWAP Відхилення: `{vwap_dist_pct:+.2f}%` | RSI 15m: `{rsi_15m:.1f}`"
+        f"💰 Ціна: `${price:,.4f}` | VWAP Відхилення: `{vwap_dist_pct:+.2f}%` | RSI 15m: `{rsi_15m:.1f}`"
     )
 
     await bot.send_photo(chat_id=LOG_CHANNEL_ID, photo=photo, caption=log_text, parse_mode="Markdown")
@@ -151,27 +152,37 @@ async def save_log(message: types.Message, state: FSMContext):
     await wait_msg.delete()
 
 async def check_alerts():
-    """Системний фоновий чекер відхилень VWAP."""
-    for symbol in ["ETH", "BTC"]:
+    """Системний фоновий чекер відхилень VWAP та шоків мікро-ліквідності."""
+    # Тепер ми проходимося по всьому масиву активів з .env
+    for symbol in WATCHLIST:
         data = await get_market_data(symbol)
         if data[0] is None: continue
         
-        price, vwap, vwap_dist_pct, rsi_15m = data[0], data[1], data[2], data[3]
+        price, vwap, vwap_dist_pct, rsi_15m, _, _, _, _, _, _, _, cur_vol, avg_vol = data
         alert_message, current_alert_type = None, None
 
+        # Детектор емерджентності (шок ліквідності)
+        is_volume_anomaly = cur_vol > (avg_vol * 2.0)
+        vol_tag = "⚠️ [АНОМАЛЬНИЙ ОБ'ЄМ]" if is_volume_anomaly else ""
+
         if vwap_dist_pct >= VWAP_ALERT_THRESHOLD: 
-            current_alert_type, alert_message = "VWAP_OVERBOUGHT", f"🚨 ПЕРЕГРІВ ({symbol}): Ціна відірвалася на {vwap_dist_pct:.2f}% вище VWAP. Готуємо ШОРТ."
+            current_alert_type = "VWAP_OVERBOUGHT"
+            alert_message = f"🚨 ПЕРЕГРІВ ({symbol}): Ціна на {vwap_dist_pct:.2f}% вище VWAP. {vol_tag} Готуємо ШОРТ."
         elif vwap_dist_pct <= -VWAP_ALERT_THRESHOLD: 
-            current_alert_type, alert_message = "VWAP_OVERSOLD", f"🚨 ОБВАЛ ({symbol}): Ціна впала на {vwap_dist_pct:.2f}% нижче VWAP. Шукаємо ЛОНГ."
+            current_alert_type = "VWAP_OVERSOLD"
+            alert_message = f"🚨 ОБВАЛ ({symbol}): Ціна на {vwap_dist_pct:.2f}% нижче VWAP. {vol_tag} Шукаємо ЛОНГ."
         elif rsi_15m >= 80: 
-            current_alert_type, alert_message = "RSI_HIGH_15M", f"⚠️ RSI ЕКСТРЕМУМ ({symbol}): {rsi_15m:.1f} на 15m таймфреймі."
+            current_alert_type = f"RSI_HIGH_15M"
+            alert_message = f"🔥 RSI ЕКСТРЕМУМ ({symbol}): {rsi_15m:.1f} на 15m таймфреймі. {vol_tag}"
         elif rsi_15m <= 20: 
-            current_alert_type, alert_message = "RSI_LOW_15M", f"⚠️ RSI ДНО ({symbol}): {rsi_15m:.1f} на 15m таймфреймі."
+            current_alert_type = f"RSI_LOW_15M"
+            alert_message = f"🧊 RSI ДНО ({symbol}): {rsi_15m:.1f} на 15m таймфреймі. {vol_tag}"
         else: 
             alert_state[f"last_{symbol}"] = None
 
+        # Відправка алерта (уникаємо спаму одного і того ж стану)
         if alert_message and current_alert_type != alert_state.get(f"last_{symbol}"):
-            await bot.send_message(chat_id=ADMIN_ID, text=alert_message)
+            await bot.send_message(chat_id=ADMIN_ID, text=alert_message.strip())
             alert_state[f"last_{symbol}"] = current_alert_type
 
 async def main():
