@@ -8,7 +8,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, logging
+from config import BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, logging, VWAP_ALERT_THRESHOLD
 from market import get_market_data, create_chart
 from ai import fetch_news, get_ai_forecast
 
@@ -28,7 +28,7 @@ main_keyboard = ReplyKeyboardMarkup(
 )
 
 def get_asset_keyboard(action_prefix: str) -> InlineKeyboardMarkup:
-    """DRY: Универсальная генерация клавиатур для активов."""
+    """DRY: Універсальна генерація клавіатур для активів."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="ETH", callback_data=f"{action_prefix}_ETH"),
@@ -38,46 +38,46 @@ def get_asset_keyboard(action_prefix: str) -> InlineKeyboardMarkup:
 
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
-    await message.answer("🏎 Привет! Это VWAP Intraday-радар. Выберите действие.", reply_markup=main_keyboard)
+    await message.answer("🏎 Привіт! Це VWAP Intraday-радар. Оберіть дію.", reply_markup=main_keyboard)
 
 @dp.message(F.text == "⚡ Intraday Radar")
 async def ask_analyze(message: types.Message):
-    await message.answer("Выберите актив для сканирования микроструктуры:", reply_markup=get_asset_keyboard("market"))
+    await message.answer("Оберіть актив для сканування мікроструктури:", reply_markup=get_asset_keyboard("market"))
 
 @dp.message(F.text == "🧠 AI Скальп")
 async def ask_ai(message: types.Message):
-    await message.answer("Выберите актив для Intraday ШИ-прогноза:", reply_markup=get_asset_keyboard("ai"))
+    await message.answer("Оберіть актив для Intraday ШІ-прогнозу:", reply_markup=get_asset_keyboard("ai"))
 
 @dp.message(F.text == "📝 Log")
 async def ask_log(message: types.Message):
-    await message.answer("Для какого актива пишем лог?", reply_markup=get_asset_keyboard("log"))
+    await message.answer("Для якого активу пишемо лог?", reply_markup=get_asset_keyboard("log"))
 
 @dp.callback_query(F.data.startswith("market_"))
 async def market_handler(call: CallbackQuery):
     await call.answer()
     symbol = call.data.split("_")[1]
-    await call.message.edit_text(f"⏳ Сканирую VWAP по {symbol}...")
+    await call.message.edit_text(f"⏳ Сканую VWAP по {symbol}...")
     
     data = await get_market_data(symbol)
     if data[0] is None:
-        return await call.message.edit_text("❌ Ошибка получения данных.")
+        return await call.message.edit_text("❌ Помилка отримання даних.")
 
-    # Распаковка новых 13 параметров интрадей-модели
+    # Розпакування 13 параметрів інтрадей-моделі
     price, vwap, vwap_dist_pct, rsi_15m, funding, df_15m, buy_pct, sell_pct, macd_15m, guide_macd, guide_name, cur_vol, avg_vol = data
 
     chart_buffer = create_chart(df_15m, price, vwap, symbol)
     photo = BufferedInputFile(chart_buffer.getvalue(), filename="chart.png")
 
-    vwap_status = "🔴 ПЕРЕГРЕВ ВВЕРХ" if vwap_dist_pct > 1.5 else ("🟢 ПЕРЕПРОДАННОСТЬ" if vwap_dist_pct < -1.5 else "⚪ В зоне баланса")
+    vwap_status = "🔴 ПЕРЕГРІВ ВГОРУ" if vwap_dist_pct > VWAP_ALERT_THRESHOLD else ("🟢 ПЕРЕПРОДАНІСТЬ" if vwap_dist_pct < -VWAP_ALERT_THRESHOLD else "⚪ В зоні балансу")
     
     text = (
         f"⚡ **VWAP Радар {symbol}/USDT (15m)**\n\n"
-        f"💰 **Цена:** `${price:,.2f}`\n"
+        f"💰 **Ціна:** `${price:,.2f}`\n"
         f"🧲 **VWAP:** `${vwap:,.2f}`\n"
-        f"📏 **Отклонение:** `{vwap_dist_pct:+.2f}%` ({vwap_status})\n\n"
+        f"📏 **Відхилення:** `{vwap_dist_pct:+.2f}%` ({vwap_status})\n\n"
         f"📈 **RSI (15m):** `{rsi_15m:.1f}`\n"
         f"🧱 **Стакан:** `{buy_pct:.0f}% / {sell_pct:.0f}%`\n"
-        f"🧭 **Импульс 15m:** {symbol} `{'Вверх' if macd_15m > 0 else 'Вниз'}` | {guide_name} `{'Вверх' if guide_macd > 0 else 'Вниз'}`"
+        f"🧭 **Імпульс 15m:** {symbol} `{'Вгору' if macd_15m > 0 else 'Вниз'}` | {guide_name} `{'Вгору' if guide_macd > 0 else 'Вниз'}`"
     )
     await call.message.delete()
     await call.message.answer_photo(photo=photo, caption=text, parse_mode="Markdown")
@@ -86,21 +86,23 @@ async def market_handler(call: CallbackQuery):
 async def ai_forecast_handler(call: CallbackQuery):
     await call.answer()
     symbol = call.data.split("_")[1]
-    await call.message.edit_text(f"🧠 Запускаю HFT-анализ для {symbol}...")
+    await call.message.edit_text(f"🧠 Запускаю HFT-аналіз для {symbol}...")
     
     data = await get_market_data(symbol)
     news = await fetch_news(symbol)
     
     if data[0] is None:
-        return await call.message.edit_text("❌ Ошибка данных.")
+        return await call.message.edit_text("❌ Помилка даних.")
 
     price, vwap, vwap_dist_pct, rsi_15m, funding, df_15m, _, _, macd_15m, guide_macd, guide_name, cur_vol, avg_vol = data
     
+    # Чому ми передаємо VWAP_ALERT_THRESHOLD: усуваємо розрив контексту. 
+    # Тепер ШІ та фоновий радар використовують єдину систему координат.
     ai_text = await get_ai_forecast(
             symbol=symbol, price=price, current_vwap=vwap, vwap_distance_pct=vwap_dist_pct,
             rsi_15m=rsi_15m, macd_hist=macd_15m, guide_macd_hist=guide_macd, 
             guide_name=guide_name, news=news, funding_rate=funding, cur_vol=cur_vol, avg_vol=avg_vol,
-            vwap_threshold=VWAP_ALERT_THRESHOLD  # <-- Передаем наш динамический порог
+            vwap_threshold=VWAP_ALERT_THRESHOLD  
         )
     
     await call.message.delete()
@@ -113,12 +115,12 @@ async def start_log_process(call: CallbackQuery, state: FSMContext):
     await state.update_data(symbol=symbol) 
     await state.set_state(LogState.waiting_for_note)
     await call.message.delete()
-    await call.message.answer(f"✍️ Опишите интрадей-сделку по **{symbol}**:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Отмена")]], resize_keyboard=True))
+    await call.message.answer(f"✍️ Опишіть інтрадей-угоду по **{symbol}**:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True))
 
-@dp.message(F.text == "❌ Отмена", LogState.waiting_for_note)
+@dp.message(F.text == "❌ Скасувати", LogState.waiting_for_note)
 async def cancel_log(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("Отменено.", reply_markup=main_keyboard)
+    await message.answer("Скасовано.", reply_markup=main_keyboard)
 
 @dp.message(LogState.waiting_for_note)
 async def save_log(message: types.Message, state: FSMContext):
@@ -126,7 +128,7 @@ async def save_log(message: types.Message, state: FSMContext):
     symbol = user_data.get("symbol", "ETH")
     user_note = message.text
     
-    wait_msg = await message.answer(f"⏳ Сохраняю лог по {symbol}...")
+    wait_msg = await message.answer(f"⏳ Зберігаю лог по {symbol}...")
     await state.clear()
     
     data = await get_market_data(symbol)
@@ -137,17 +139,18 @@ async def save_log(message: types.Message, state: FSMContext):
 
     log_text = (
         f"📖 **INTRADAY ЖУРНАЛ ({symbol})** | `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}`\n\n"
-        f"📝 **Запись:**\n_{user_note}_\n\n"
-        f"💰 Цена: `${price:,.2f}` | VWAP Откл: `{vwap_dist_pct:+.2f}%` | RSI 15m: `{rsi_15m:.1f}`"
+        f"📝 **Запис:**\n_{user_note}_\n\n"
+        f"💰 Ціна: `${price:,.2f}` | VWAP Відхилення: `{vwap_dist_pct:+.2f}%` | RSI 15m: `{rsi_15m:.1f}`"
     )
 
     await bot.send_photo(chat_id=LOG_CHANNEL_ID, photo=photo, caption=log_text, parse_mode="Markdown")
-    await message.answer("✅ Сохранено в журнал!", reply_markup=main_keyboard)
+    await message.answer("✅ Збережено в журнал!", reply_markup=main_keyboard)
     await wait_msg.delete()
 
 async def check_alerts():
     """
-    Системный фоновый чекер. В интрадее ищем экстремальные отклонения от VWAP.
+    Системний фоновий чекер. Використовує динамічний поріг з конфігурації 
+    для пошуку екстремальних відхилень від VWAP.
     """
     for symbol in ["ETH", "BTC"]:
         data = await get_market_data(symbol)
@@ -156,15 +159,15 @@ async def check_alerts():
         price, vwap, vwap_dist_pct, rsi_15m = data[0], data[1], data[2], data[3]
         alert_message, current_alert_type = None, None
 
-        # Эмерджентные триггеры интрадея
-        if vwap_dist_pct >= 1.5: 
-            current_alert_type, alert_message = "VWAP_OVERBOUGHT", f"🚨 ПЕРЕГРЕВ ({symbol}): Цена улетела на {vwap_dist_pct:.2f}% выше VWAP. Готовим ШОРТ."
-        elif vwap_dist_pct <= -1.5: 
-            current_alert_type, alert_message = "VWAP_OVERSOLD", f"🚨 ОБВАЛ ({symbol}): Цена упала на {vwap_dist_pct:.2f}% ниже VWAP. Ищем ЛОНГ."
+        # Емерджентні тригери інтрадея (застосовуємо динамічний поріг)
+        if vwap_dist_pct >= VWAP_ALERT_THRESHOLD: 
+            current_alert_type, alert_message = "VWAP_OVERBOUGHT", f"🚨 ПЕРЕГРІВ ({symbol}): Ціна відірвалася на {vwap_dist_pct:.2f}% вище VWAP. Готуємо ШОРТ."
+        elif vwap_dist_pct <= -VWAP_ALERT_THRESHOLD: 
+            current_alert_type, alert_message = "VWAP_OVERSOLD", f"🚨 ОБВАЛ ({symbol}): Ціна впала на {vwap_dist_pct:.2f}% нижче VWAP. Шукаємо ЛОНГ."
         elif rsi_15m >= 80: 
-            current_alert_type, alert_message = "RSI_HIGH_15M", f"⚠️ RSI ЭКСТРЕМУМ ({symbol}): {rsi_15m:.1f} на 15m таймфрейме."
+            current_alert_type, alert_message = "RSI_HIGH_15M", f"⚠️ RSI ЕКСТРЕМУМ ({symbol}): {rsi_15m:.1f} на 15m таймфреймі."
         elif rsi_15m <= 20: 
-            current_alert_type, alert_message = "RSI_LOW_15M", f"⚠️ RSI ДНО ({symbol}): {rsi_15m:.1f} на 15m таймфрейме."
+            current_alert_type, alert_message = "RSI_LOW_15M", f"⚠️ RSI ДНО ({symbol}): {rsi_15m:.1f} на 15m таймфреймі."
         else: 
             alert_state[f"last_{symbol}"] = None
 
@@ -173,7 +176,7 @@ async def check_alerts():
             alert_state[f"last_{symbol}"] = current_alert_type
 
 async def main():
-    # В интрадее 15 минут - слишком долго. Проверяем каждые 5 минут.
+    # В інтрадеї перевірка кожні 5 хвилин дозволяє фіксувати швидкоплинні дисбаланси
     scheduler.add_job(check_alerts, 'interval', minutes=5)
     scheduler.start()
     await bot.delete_webhook(drop_pending_updates=True) 

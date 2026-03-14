@@ -10,10 +10,11 @@ ADMIN_ID = os.getenv("ADMIN_ID")
 LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# --- НАЛАШТУВАННЯ РИЗИК-МЕНЕДЖМЕНТУ ---
-TRADE_DEPOSIT = float(os.getenv("TRADE_DEPOSIT", 1000)) # Ваш депозит у доларах
-TRADE_RISK_PCT = float(os.getenv("TRADE_RISK_PCT", 20))  # Ризик на угоду у відсотках (1%)
-# ---------------------------------------
+# --- НАЛАШТУВАННЯ РАДАРА ---
+# Чому використовується getenv з fallback: забезпечує стійкість системи. 
+# Якщо змінної немає в .env, бот не впаде, а використає безпечне значення 1.0.
+VWAP_ALERT_THRESHOLD = float(os.getenv("VWAP_ALERT_THRESHOLD", 1.0))
+# ------------------------
 
 if not all([BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, GEMINI_API_KEY]):
     raise ValueError("Відсутні токени в .env!")
