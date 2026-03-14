@@ -23,11 +23,9 @@ async def fetch_news(symbol: str = "ETH") -> str:
 
 async def get_ai_forecast(symbol: str, price: float, current_vwap: float, vwap_distance_pct: float, 
                           rsi_15m: float, macd_hist: float, guide_macd_hist: float, guide_name: str, 
-                          news: str, funding_rate: float, cur_vol: float, avg_vol: float) -> str:
-    """
-    Формирует промпт для интрадей-анализа.
-    Почему VWAP: это институциональный якорь. ШИ должен понимать, насколько цена отклонилась от справедливой.
-    """
+                          news: str, funding_rate: float, cur_vol: float, avg_vol: float,
+                          vwap_threshold: float) -> str: # <-- Добавлен новый аргумент
+    
     vol_status = "АНОМАЛЬНЫЙ РОСТ" if cur_vol > avg_vol * 1.5 else ("ПАДАЮТ" if cur_vol < avg_vol * 0.8 else "В пределах нормы")
 
     prompt = f"""
@@ -37,7 +35,7 @@ async def get_ai_forecast(symbol: str, price: float, current_vwap: float, vwap_d
     ДАННЫЕ РЫНКА (АКТИВ: {symbol}/USDT, ТАЙМФРЕЙМ: 15m):
     - Текущая цена: {price:.2f}
     - Институциональный якорь (VWAP): {current_vwap:.2f}
-    - Отклонение цены от VWAP: {vwap_distance_pct:.2f}% (Положительное = перегрев вверх, Отрицательное = падение ниже средневзвешенной цены)
+    - Отклонение цены от VWAP: {vwap_distance_pct:.2f}% 
     - RSI (15m): {rsi_15m:.1f}
     - Локальный импульс (MACD 15m): {'Бычий (Вверх)' if macd_hist > 0 else 'Медвежий (Вниз)'}
     - Объемы торгов (относительно 10 свечей): {vol_status}
@@ -48,8 +46,8 @@ async def get_ai_forecast(symbol: str, price: float, current_vwap: float, vwap_d
     {news}
     
     СТРОГИЙ АЛГОРИТМ РАССУЖДЕНИЙ (Chain of Thought):
-    1. [Анализ Отклонения]: Оцени Отклонение от VWAP ({vwap_distance_pct:.2f}%). Если оно около 0%, цена в равновесии (опасность флэта). Если > 1.5% или < -1.5%, вероятен институциональный возврат к средней (Mean Reversion).
-    2. [Аналіз Ліквідності]: Оцени Funding и RSI 15m. Есть ли локальный перегрев толпы на 15-минутном таймфрейме?
+    1. [Анализ Отклонения]: Оцени Отклонение от VWAP ({vwap_distance_pct:.2f}%). ТВОЙ КРИТИЧЕСКИЙ ПОРОГ для этого рынка: {vwap_threshold}%. Если отклонение около 0%, цена в равновесии (риск флэта). Если отклонение превышает +{vwap_threshold}% или падает ниже -{vwap_threshold}%, это математическая аномалия — вероятен институциональный возврат к средней (Mean Reversion).
+    2. [Анализ Ликвидности]: Оцени Funding и RSI 15m. Есть ли локальный перегрев толпы?
     3. [Синтез]: Сопоставь Отклонение VWAP, Поводыря и Объемы для поиска безопасной точки входа.
     
     ФОРМАТ ОТВЕТА:
@@ -58,7 +56,6 @@ async def get_ai_forecast(symbol: str, price: float, current_vwap: float, vwap_d
     **💡 Intraday-вердикт (15m - 3h)**: (ЛОНГ / ШОРТ / ВНЕ РЫНКА (Ждать отката к VWAP)).
     """
     try:
-        # Низкая температура для устранения креативных галлюцинаций в строгой математике
         response = await ai_model.generate_content_async(prompt, generation_config={"temperature": 0.1})
         return response.text
     except Exception as e:

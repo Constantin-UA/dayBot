@@ -97,10 +97,11 @@ async def ai_forecast_handler(call: CallbackQuery):
     price, vwap, vwap_dist_pct, rsi_15m, funding, df_15m, _, _, macd_15m, guide_macd, guide_name, cur_vol, avg_vol = data
     
     ai_text = await get_ai_forecast(
-        symbol=symbol, price=price, current_vwap=vwap, vwap_distance_pct=vwap_dist_pct,
-        rsi_15m=rsi_15m, macd_hist=macd_15m, guide_macd_hist=guide_macd, 
-        guide_name=guide_name, news=news, funding_rate=funding, cur_vol=cur_vol, avg_vol=avg_vol
-    )
+            symbol=symbol, price=price, current_vwap=vwap, vwap_distance_pct=vwap_dist_pct,
+            rsi_15m=rsi_15m, macd_hist=macd_15m, guide_macd_hist=guide_macd, 
+            guide_name=guide_name, news=news, funding_rate=funding, cur_vol=cur_vol, avg_vol=avg_vol,
+            vwap_threshold=VWAP_ALERT_THRESHOLD  # <-- Передаем наш динамический порог
+        )
     
     await call.message.delete()
     await call.message.answer(f"🤖 **Intraday AI ({symbol}):**\n\n{ai_text}", parse_mode="Markdown")
