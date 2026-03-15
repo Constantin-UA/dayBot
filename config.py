@@ -2,6 +2,7 @@ import os
 import logging
 from dotenv import load_dotenv
 from google import genai
+import ccxt.async_support as ccxt
 
 load_dotenv()
 
@@ -19,5 +20,8 @@ if not all([BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, GEMINI_API_KEY]):
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Чому: Перехід на сучасний синхронно-асинхронний клієнт згідно зі специфікаціями Google 2026 року.
 client = genai.Client(api_key=GEMINI_API_KEY)
+
+# Чому: Патерн Singleton для управління I/O. 
+# Створюємо єдиний постійний екземпляр з'єднання з біржею для всього життєвого циклу додатку.
+exchange = ccxt.bybit({'enableRateLimit': True})
