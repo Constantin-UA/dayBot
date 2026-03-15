@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import re
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -10,6 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config import BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, logging, VWAP_ALERT_THRESHOLD, WATCHLIST
 from market import get_market_data, create_chart
 from ai import fetch_news, get_ai_forecast
+from memory import init_db, save_signal, resolve_open_signals, get_recent_stats
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -27,13 +29,22 @@ main_keyboard = ReplyKeyboardMarkup(
 )
 
 def get_asset_keyboard(action_prefix: str) -> InlineKeyboardMarkup:
-    """
-    DRY: Динамічна генерація клавіатури на основі Watchlist з .env.
-    Пакує кнопки по 3 в один ряд для зручності на мобільних пристроях.
-    """
+    """DRY: Динамічна генерація клавіатури на основі Watchlist з .env."""
     buttons = [InlineKeyboardButton(text=coin, callback_data=f"{action_prefix}_{coin}") for coin in WATCHLIST]
     keyboard = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+async def parse_and_save_signal(ai_text: str, symbol: str, price: float):
+    """Витягує торговий план з тексту ШІ та зберігає в пам'ять."""
+    direction_match = re.search(r'Intraday-вердикт\*\*:\s*(ЛОНГ|ШОРТ)', ai_text, re.IGNORECASE)
+    tp_match = re.search(r'Тейк-профіт\*\*:\s*([\d\.]+)', ai_text)
+    sl_match = re.search(r'Стоп-лос\*\*:\s*([\d\.]+)', ai_text)
+
+    if direction_match and tp_match and sl_match:
+        direction = direction_match.group(1).upper()
+        tp = float(tp_match.group(1))
+        sl = float(sl_match.group(1))
+        await save_signal(symbol, direction, price, tp, sl)
 
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
@@ -67,8 +78,6 @@ async def market_handler(call: CallbackQuery):
     photo = BufferedInputFile(chart_buffer.getvalue(), filename="chart.png")
 
     vwap_status = "🔴 ПЕРЕГРІВ ВГОРУ" if vwap_dist_pct > VWAP_ALERT_THRESHOLD else ("🟢 ПЕРЕПРОДАНІСТЬ" if vwap_dist_pct < -VWAP_ALERT_THRESHOLD else "⚪ В зоні балансу")
-    
-    # Індикатор об'єму для ручного запиту
     vol_tag = "⚠️ АНОМАЛІЯ ОБ'ЄМУ" if cur_vol > (avg_vol * 2.0) else "Норма"
 
     text = (
@@ -97,18 +106,21 @@ async def ai_forecast_handler(call: CallbackQuery):
         return await call.message.edit_text("❌ Помилка даних.")
 
     price, vwap, vwap_dist_pct, rsi_15m, funding, df_15m, _, _, macd_15m, guide_macd, guide_name, cur_vol, avg_vol = data
-    
     local_high = float(df_15m['high'].tail(4).max())
     local_low = float(df_15m['low'].tail(4).min())
     
-    ai_text = await get_ai_forecast(
-            symbol=symbol, price=price, current_vwap=vwap, vwap_distance_pct=vwap_dist_pct,
-            rsi_15m=rsi_15m, macd_hist=macd_15m, guide_macd_hist=guide_macd, 
-            guide_name=guide_name, news=news, funding_rate=funding, cur_vol=cur_vol, avg_vol=avg_vol,
-            vwap_threshold=VWAP_ALERT_THRESHOLD,
-            local_high=local_high, local_low=local_low
-        )
+    # Витягуємо пам'ять ШІ
+    total_sig, win_rate = await get_recent_stats()
     
+    ai_text = await get_ai_forecast(
+        symbol=symbol, price=price, current_vwap=vwap, vwap_distance_pct=vwap_dist_pct,
+        rsi_15m=rsi_15m, macd_hist=macd_15m, guide_macd_hist=guide_macd, 
+        guide_name=guide_name, news=news, funding_rate=funding, cur_vol=cur_vol, avg_vol=avg_vol,
+        vwap_threshold=VWAP_ALERT_THRESHOLD, local_high=local_high, local_low=local_low,
+        total_signals=total_sig, win_rate=win_rate
+    )
+    
+    await parse_and_save_signal(ai_text, symbol, price)
     await call.message.delete()
     await call.message.answer(f"🤖 **Intraday AI ({symbol}):**\n\n{ai_text}", parse_mode="Markdown")
 
@@ -152,13 +164,14 @@ async def save_log(message: types.Message, state: FSMContext):
     await wait_msg.delete()
 
 async def check_alerts():
-    """Системний фоновий чекер відхилень VWAP з АВТОМАТИЧНИМ ШІ-АНАЛІЗОМ."""
+    current_prices_for_memory = {}
+
     for symbol in WATCHLIST:
         data = await get_market_data(symbol)
         if data[0] is None: continue
         
-        # Розпаковуємо всі змінні, оскільки тепер вони потрібні для ШІ
         price, vwap, vwap_dist_pct, rsi_15m, funding, df_15m, buy_pct, sell_pct, macd_15m, guide_macd, guide_name, cur_vol, avg_vol = data
+        current_prices_for_memory[symbol] = price
         alert_message, current_alert_type = None, None
 
         is_volume_anomaly = cur_vol > (avg_vol * 2.0)
@@ -180,33 +193,34 @@ async def check_alerts():
             alert_state[f"last_{symbol}"] = None
 
         if alert_message and current_alert_type != alert_state.get(f"last_{symbol}"):
-            # 1. Відправляємо швидкий базовий алерт
             await bot.send_message(chat_id=ADMIN_ID, text=alert_message.strip())
             alert_state[f"last_{symbol}"] = current_alert_type
 
-            # 2. АВТОМАТИЧНИЙ ШІ-АНАЛІЗ (Тільки для математичних аномалій VWAP)
             if current_alert_type in ["VWAP_OVERBOUGHT", "VWAP_OVERSOLD"]:
                 await bot.send_message(chat_id=ADMIN_ID, text=f"🧠 Запускаю авто-аналіз мікроструктури для {symbol}...")
                 
                 local_high = float(df_15m['high'].tail(4).max())
                 local_low = float(df_15m['low'].tail(4).min())
                 news = await fetch_news(symbol)
+                total_sig, win_rate = await get_recent_stats()
 
                 ai_text = await get_ai_forecast(
                     symbol=symbol, price=price, current_vwap=vwap, vwap_distance_pct=vwap_dist_pct,
                     rsi_15m=rsi_15m, macd_hist=macd_15m, guide_macd_hist=guide_macd, 
                     guide_name=guide_name, news=news, funding_rate=funding, cur_vol=cur_vol, avg_vol=avg_vol,
-                    vwap_threshold=VWAP_ALERT_THRESHOLD,
-                    local_high=local_high, local_low=local_low
+                    vwap_threshold=VWAP_ALERT_THRESHOLD, local_high=local_high, local_low=local_low,
+                    total_signals=total_sig, win_rate=win_rate
                 )
                 
+                await parse_and_save_signal(ai_text, symbol, price)
                 await bot.send_message(chat_id=ADMIN_ID, text=f"🤖 **Auto AI ({symbol}):**\n\n{ai_text}", parse_mode="Markdown")
-                
-                # 3. Балансуючий цикл: штучна пауза 3 секунди. 
-                # Захищає API Gemini від бану, якщо одночасно впали 8 монет.
                 await asyncio.sleep(3)
+    
+    # Виклик Арбітра Реальності для оновлення статусів угод в БД
+    await resolve_open_signals(current_prices_for_memory)
 
 async def main():
+    await init_db() # Ініціалізація бази даних при старті
     scheduler.add_job(check_alerts, 'interval', minutes=5)
     scheduler.start()
     await bot.delete_webhook(drop_pending_updates=True) 

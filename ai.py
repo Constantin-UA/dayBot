@@ -5,10 +5,7 @@ import datetime
 from config import ai_model
 
 async def fetch_news(symbol: str = "ETH") -> str:
-    """
-    Ізолюємо мережевий запит. Новини дають макро-контекст, 
-    який може зламати будь-який інтрадей-патерн.
-    """
+    """Ізолюємо мережевий запит. Новини дають макро-контекст."""
     tags = {"ETH": "ethereum", "BTC": "bitcoin"}
     tag = tags.get(symbol, "cryptocurrency")
     try:
@@ -25,16 +22,26 @@ async def fetch_news(symbol: str = "ETH") -> str:
 async def get_ai_forecast(symbol: str, price: float, current_vwap: float, vwap_distance_pct: float, 
                           rsi_15m: float, macd_hist: float, guide_macd_hist: float, guide_name: str, 
                           news: str, funding_rate: float, cur_vol: float, avg_vol: float,
-                          vwap_threshold: float, local_high: float, local_low: float) -> str:
+                          vwap_threshold: float, local_high: float, local_low: float,
+                          total_signals: int, win_rate: float) -> str:
     
-    # СИСТЕМНА ІНТЕГРАЦІЯ: Зчитуємо поточний час по UTC для синхронізації з біржами
     current_time_utc = datetime.datetime.now(datetime.timezone.utc).strftime('%H:%M')
-    
     vol_status = "АНОМАЛЬНИЙ РІСТ" if cur_vol > avg_vol * 1.5 else ("ПАДАЮТЬ" if cur_vol < avg_vol * 0.8 else "В межах норми")
+
+    # Емерджентний блок рефлексії (Балансуючий зворотний зв'язок)
+    if total_signals >= 3 and win_rate < 40.0:
+        reflection_block = f"КРИТИЧНА УВАГА: Твій Win Rate за 24 години впав до {win_rate:.1f}%. Ринок у стадії жорсткого 'запилу' (зняття ліквідності). ТИ ЗОБОВ'ЯЗАНИЙ ПОДВОЇТИ ЖОРСТКІСТЬ ФІЛЬТРІВ. Якщо Risk/Reward не ідеальний — видавай вердикт ПОЗА РИНКОМ."
+    elif total_signals >= 3 and win_rate >= 60.0:
+        reflection_block = f"ВІДМІННО: Твій Win Rate {win_rate:.1f}%. Ти знаходишся в ідеальній синергії з ринком. Продовжуй шукати інтрадей-аномалії за поточними критеріями."
+    else:
+        reflection_block = f"Статистика: {total_signals} угод, Win Rate {win_rate:.1f}%. Зберігай стандартний нейтральний підхід до ризик-менеджменту."
 
     prompt = f"""
     Ти — алгоритмічний HFT-аналітик та ризик-менеджер. Твоя спеціалізація — ДЕЙТРЕЙДИНГ.
     Твоя задача — провести жорсткий математичний аналіз мікроструктури та видати готовий торговий план.
+
+    [САМОРЕФЛЕКСІЯ ТА MLOps]:
+    {reflection_block}
 
     ДАНІ РИНКУ (АКТИВ: {symbol}/USDT, ТАЙМФРЕЙМ: 15m):
     - Поточна ціна: {price:.2f}
@@ -59,13 +66,13 @@ async def get_ai_forecast(symbol: str, price: float, current_vwap: float, vwap_d
     {news}
 
     СТРОГИЙ АЛГОРИТМ МІРКУВАНЬ (Chain of Thought):
-    1. [Аналіз Сесії]: Оціни ПОТОЧНИЙ ЧАС (UTC). Хто зараз на ринку? Якщо це Азія, будь-які імпульси без новин вважай підозрілими (ризик хибного пробою). Якщо це накладання Лондона та Нью-Йорка, довіряй тренду більше.
+    1. [Аналіз Сесії]: Оціни ПОТОЧНИЙ ЧАС (UTC). Хто зараз на ринку? Якщо це Азія, будь-які імпульси без новин вважай підозрілими. Якщо це накладання Лондона та Нью-Йорка, довіряй тренду більше.
     2. [Аналіз Відхилення]: Оціни Відхилення ({vwap_distance_pct:.2f}%). Твій поріг: {vwap_threshold}%.
     3. [Аналіз Ліквідності]: Оціни Funding та RSI.
     4. [Математика Ризику (Risk/Reward)]: Це НАЙВАЖЛИВІШИЙ КРОК. 
        - Потенційний прибуток (Reward) — це завжди повернення до VWAP ({current_vwap:.2f}).
        - Потенційний збиток (Risk) — це відступ за локальний екстремум (для Лонга СТОП = {local_low:.2f}, для Шорта СТОП = {local_high:.2f}). 
-       - Подумки порівняй ці дистанції. Якщо відстань до Стопа більша, ніж відстань до VWAP (Risk > Reward), ти ЗОБОВ'ЯЗАНИЙ заборонити вхід у ринок.
+       - Якщо відстань до Стопа більша, ніж відстань до VWAP (Risk > Reward), ти ЗОБОВ'ЯЗАНИЙ заборонити вхід у ринок.
     
     ФОРМАТ ВІДПОВІДІ:
     **🔍 [Аналіз Мікроструктури та Часу]**: (2-3 речення)
@@ -74,9 +81,9 @@ async def get_ai_forecast(symbol: str, price: float, current_vwap: float, vwap_d
     **💡 Intraday-вердикт**: (ЛОНГ / ШОРТ / ПОЗА РИНКОМ)
 
     (Якщо вердикт ЛОНГ або ШОРТ, ОБОВ'ЯЗКОВО додай наступний блок):
-    🎯 **Тейк-профіт**: {current_vwap:.2f} (Динамічний магніт VWAP)
+    🎯 **Тейк-профіт**: {current_vwap:.2f}
     🛑 **Стоп-лос**: (Вкажи {local_low:.2f} для Лонга або {local_high:.2f} для Шорта)
-    ⏱ **Час життя ідеї (TTL)**: Максимум 3 години. Якщо ціна не торкнулася VWAP і не вибила Стоп-лос, закрити позицію за поточними цінами (нульовий овернайт-ризик).
+    ⏱ **Час життя ідеї (TTL)**: Максимум 3 години.
     """
     try:
         response = await ai_model.generate_content_async(prompt, generation_config={"temperature": 0.1})
