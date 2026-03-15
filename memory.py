@@ -5,6 +5,9 @@ import pandas as pd
 
 DB_PATH = "data/trades.db"
 
+# Чому: Фіксація транзакційних витрат (Maker/Taker) для усунення ілюзії прибутковості мікро-рухів.
+FEE_RATE = 0.0012 
+
 async def init_db():
     """Ініціалізація бази даних (Гіпокамп системи)."""
     async with aiosqlite.connect(DB_PATH) as db:
@@ -34,14 +37,15 @@ async def save_signal(symbol: str, direction: str, entry: float, tp: float, sl: 
 
 async def resolve_open_signals(market_dataframes: dict):
     """
-    Арбітр Реальності 2.0 (High/Low Trajectory Analysis).
-    Перевіряє історію свічок (High/Low) замість точкових зрізів ціни.
-    Використовує Песимістичне Виконання для усунення помилки виживання.
+    Арбітр Реальності 3.0 (Dynamic Trailing & Commission Tax).
+    Переводить позиції в безубиток при досягненні 50% цілі.
+    Відфільтровує математично збиткові "WIN" сигнали.
     """
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT id, symbol, direction, take_profit, stop_loss, timestamp FROM signals WHERE status = 'OPEN'") as cursor:
+        # Чому: Додано entry_price до вибірки, оскільки тепер він потрібен для розрахунку комісій та трейлінгу.
+        async with db.execute("SELECT id, symbol, direction, entry_price, take_profit, stop_loss, timestamp FROM signals WHERE status = 'OPEN'") as cursor:
             async for row in cursor:
-                sig_id, symbol, direction, tp, sl, ts_str = row
+                sig_id, symbol, direction, entry_price, tp, sl, ts_str = row
                 
                 if symbol not in market_dataframes:
                     continue
@@ -50,20 +54,27 @@ async def resolve_open_signals(market_dataframes: dict):
                 if df is None or df.empty:
                     continue
                 
-                # Парсимо час сигналу. Формат SQLite зберігає +00:00 для UTC
                 try:
                     sig_time = datetime.datetime.fromisoformat(ts_str)
                     if sig_time.tzinfo is None:
                         sig_time = sig_time.replace(tzinfo=datetime.timezone.utc)
                 except Exception as e:
-                    logging.error(f"Помилка парсингу часу для сигналу {sig_id}: {e}")
+                    logging.error(f"Помилка парсингу часу для {sig_id}: {e}")
                     continue
 
                 now = datetime.datetime.now(datetime.timezone.utc)
                 status = "OPEN"
-                
-                # Чому: Ітеруємося по свічках, що сформувалися ПІСЛЯ видачі сигналу.
-                # Свічка 15m маркується часом початку. Тому кінець свічки = індекс + 15хв.
+                breakeven_triggered = False
+                current_sl = sl
+
+                # Чому: Розрахунок точки 50% шляху (half_target) та точки безпечного виходу (be_price) з урахуванням біржових зборів.
+                if direction == "ЛОНГ":
+                    half_target = entry_price + (tp - entry_price) * 0.5
+                    be_price = entry_price * (1 + FEE_RATE)
+                else: # ШОРТ
+                    half_target = entry_price - (entry_price - tp) * 0.5
+                    be_price = entry_price * (1 - FEE_RATE)
+
                 for idx, candle in df.iterrows():
                     candle_end_time = idx + pd.Timedelta(minutes=15)
                     
@@ -71,50 +82,74 @@ async def resolve_open_signals(market_dataframes: dict):
                         high = float(candle['high'])
                         low = float(candle['low'])
                         
+                        # Чому: Динамічний захист капіталу (Trailing Stop). Якщо ціна пройшла половину шляху, ми не маємо права отримати збиток.
+                        if direction == "ЛОНГ" and not breakeven_triggered:
+                            if high >= half_target:
+                                current_sl = be_price
+                                breakeven_triggered = True
+                        elif direction == "ШОРТ" and not breakeven_triggered:
+                            if low <= half_target:
+                                current_sl = be_price
+                                breakeven_triggered = True
+
                         hit_tp = False
                         hit_sl = False
                         
-                        # Математична перевірка екстремумів
+                        # Перевірка екстремумів відносно динамічного стопа
                         if direction == "ЛОНГ":
-                            if low <= sl: hit_sl = True
+                            if low <= current_sl: hit_sl = True
                             if high >= tp: hit_tp = True
                         elif direction == "ШОРТ":
-                            if high >= sl: hit_sl = True
+                            if high >= current_sl: hit_sl = True
                             if low <= tp: hit_tp = True
                             
-                        # Чому: Pessimistic Execution. Якщо в одній свічці зачепило і SL, і TP — 
-                        # ми записуємо LOSS, щоб не створювати ілюзію грааля без тікових даних.
+                        # Чому: Pessimistic Execution з урахуванням нових станів.
                         if hit_sl:
-                            status = "LOSS"
+                            if breakeven_triggered:
+                                status = "BREAKEVEN"
+                            else:
+                                status = "LOSS"
                             break
                         elif hit_tp and not hit_sl:
-                            status = "WIN"
+                            # Чому: Податок на виконання. Якщо тейк-профіт візуально досягнуто, але він менший за комісію, це математичний збиток.
+                            gross_profit_pct = abs(tp - entry_price) / entry_price
+                            if gross_profit_pct > FEE_RATE:
+                                status = "WIN"
+                            else:
+                                status = "LOSS" 
                             break
 
-                # Перевірка TTL (3 години) якщо статус досі OPEN
                 if status == "OPEN" and (now - sig_time).total_seconds() > 3 * 3600:
                     status = "EXPIRED"
 
                 if status != "OPEN":
                     await db.execute("UPDATE signals SET status = ? WHERE id = ?", (status, sig_id))
-                    logging.info(f"Сигнал {sig_id} по {symbol} закрито зі статусом {status} (Арбітр Реальності 2.0)")
+                    logging.info(f"Сигнал {sig_id} по {symbol} закрито зі статусом {status}")
         
         await db.commit()
 
 async def get_recent_stats() -> tuple:
-    """Повертає (total_signals, win_rate_pct) за останні 24 години."""
+    """
+    Повертає статистику. BREAKEVEN ігнорується при розрахунку WinRate, 
+    оскільки не несе ні прибутку, ні збитку.
+    """
     yesterday = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
     async with aiosqlite.connect(DB_PATH) as db:
+        # Чому: Додаємо BREAKEVEN до вибірки для загального підрахунку активності.
         async with db.execute(
-            "SELECT status FROM signals WHERE timestamp >= ? AND status IN ('WIN', 'LOSS')", 
+            "SELECT status FROM signals WHERE timestamp >= ? AND status IN ('WIN', 'LOSS', 'BREAKEVEN')", 
             (yesterday,)
         ) as cursor:
             results = await cursor.fetchall()
             
-    total = len(results)
-    if total == 0:
-        return 0, 50.0 
-        
+    total_resolved = len(results)
     wins = sum(1 for r in results if r[0] == "WIN")
-    win_rate = (wins / total) * 100
-    return total, win_rate
+    losses = sum(1 for r in results if r[0] == "LOSS")
+    
+    # Чому: Win Rate рахується виключно по ризикових угодах (ті, що дали чистий плюс або чистий мінус).
+    strict_total = wins + losses
+    if strict_total == 0:
+        return total_resolved, 50.0 
+        
+    win_rate = (wins / strict_total) * 100
+    return total_resolved, win_rate
