@@ -1,6 +1,5 @@
 import asyncio
 import datetime
-import re
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -29,22 +28,10 @@ main_keyboard = ReplyKeyboardMarkup(
 )
 
 def get_asset_keyboard(action_prefix: str) -> InlineKeyboardMarkup:
-    """DRY: Динамічна генерація клавіатури на основі Watchlist з .env."""
+    # Чому: DRY-принцип, генерація UI на основі константи з конфігурації.
     buttons = [InlineKeyboardButton(text=coin, callback_data=f"{action_prefix}_{coin}") for coin in WATCHLIST]
     keyboard = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-async def parse_and_save_signal(ai_text: str, symbol: str, price: float):
-    """Витягує торговий план з тексту ШІ та зберігає в пам'ять."""
-    direction_match = re.search(r'Intraday-вердикт\*\*:\s*(ЛОНГ|ШОРТ)', ai_text, re.IGNORECASE)
-    tp_match = re.search(r'Тейк-профіт\*\*:\s*([\d\.]+)', ai_text)
-    sl_match = re.search(r'Стоп-лос\*\*:\s*([\d\.]+)', ai_text)
-
-    if direction_match and tp_match and sl_match:
-        direction = direction_match.group(1).upper()
-        tp = float(tp_match.group(1))
-        sl = float(sl_match.group(1))
-        await save_signal(symbol, direction, price, tp, sl)
 
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
@@ -109,10 +96,9 @@ async def ai_forecast_handler(call: CallbackQuery):
     local_high = float(df_15m['high'].tail(4).max())
     local_low = float(df_15m['low'].tail(4).min())
     
-    # Витягуємо пам'ять ШІ
     total_sig, win_rate = await get_recent_stats()
     
-    ai_text = await get_ai_forecast(
+    verdict_obj = await get_ai_forecast(
         symbol=symbol, price=price, current_vwap=vwap, vwap_distance_pct=vwap_dist_pct,
         rsi_15m=rsi_15m, macd_hist=macd_15m, guide_macd_hist=guide_macd, 
         guide_name=guide_name, news=news, funding_rate=funding, cur_vol=cur_vol, avg_vol=avg_vol,
@@ -120,9 +106,32 @@ async def ai_forecast_handler(call: CallbackQuery):
         total_signals=total_sig, win_rate=win_rate
     )
     
-    await parse_and_save_signal(ai_text, symbol, price)
+    # Чому: Захист контуру управління (Execution Layer) від нульових покажчиків при падінні ШІ.
+    if verdict_obj is None:
+        return await call.message.edit_text("❌ Збій генерації або валідації торгового плану ШІ.")
+
+    if verdict_obj.direction in ["ЛОНГ", "ШОРТ"] and verdict_obj.take_profit and verdict_obj.stop_loss:
+        await save_signal(
+            symbol=symbol, 
+            direction=verdict_obj.direction, 
+            entry=price, 
+            tp=verdict_obj.take_profit, 
+            sl=verdict_obj.stop_loss
+        )
+
+    ui_text = (
+        f"🤖 **Intraday AI ({symbol}):**\n\n"
+        f"**🔍 Мікроструктура:**\n{verdict_obj.analysis}\n\n"
+        f"**⚖️ Синтез:**\n{verdict_obj.synthesis}\n\n"
+        f"**💡 Вердикт:** {verdict_obj.direction}\n"
+    )
+    
+    if verdict_obj.direction != "ПОЗА РИНКОМ":
+        ui_text += f"🎯 **Тейк-профіт**: {verdict_obj.take_profit}\n"
+        ui_text += f"🛑 **Стоп-лос**: {verdict_obj.stop_loss}\n"
+
     await call.message.delete()
-    await call.message.answer(f"🤖 **Intraday AI ({symbol}):**\n\n{ai_text}", parse_mode="Markdown")
+    await call.message.answer(ui_text, parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith("log_"))
 async def start_log_process(call: CallbackQuery, state: FSMContext):
@@ -204,7 +213,7 @@ async def check_alerts():
                 news = await fetch_news(symbol)
                 total_sig, win_rate = await get_recent_stats()
 
-                ai_text = await get_ai_forecast(
+                verdict_obj = await get_ai_forecast(
                     symbol=symbol, price=price, current_vwap=vwap, vwap_distance_pct=vwap_dist_pct,
                     rsi_15m=rsi_15m, macd_hist=macd_15m, guide_macd_hist=guide_macd, 
                     guide_name=guide_name, news=news, funding_rate=funding, cur_vol=cur_vol, avg_vol=avg_vol,
@@ -212,15 +221,37 @@ async def check_alerts():
                     total_signals=total_sig, win_rate=win_rate
                 )
                 
-                await parse_and_save_signal(ai_text, symbol, price)
-                await bot.send_message(chat_id=ADMIN_ID, text=f"🤖 **Auto AI ({symbol}):**\n\n{ai_text}", parse_mode="Markdown")
+                if verdict_obj:
+                    if verdict_obj.direction in ["ЛОНГ", "ШОРТ"] and verdict_obj.take_profit and verdict_obj.stop_loss:
+                        await save_signal(
+                            symbol=symbol, 
+                            direction=verdict_obj.direction, 
+                            entry=price, 
+                            tp=verdict_obj.take_profit, 
+                            sl=verdict_obj.stop_loss
+                        )
+
+                    ui_text = (
+                        f"🤖 **Auto AI ({symbol}):**\n\n"
+                        f"**🔍 Мікроструктура:**\n{verdict_obj.analysis}\n\n"
+                        f"**⚖️ Синтез:**\n{verdict_obj.synthesis}\n\n"
+                        f"**💡 Вердикт:** {verdict_obj.direction}\n"
+                    )
+                    
+                    if verdict_obj.direction != "ПОЗА РИНКОМ":
+                        ui_text += f"🎯 **Тейк-профіт**: {verdict_obj.take_profit}\n"
+                        ui_text += f"🛑 **Стоп-лос**: {verdict_obj.stop_loss}\n"
+
+                    await bot.send_message(chat_id=ADMIN_ID, text=ui_text, parse_mode="Markdown")
+                else:
+                    await bot.send_message(chat_id=ADMIN_ID, text=f"❌ Авто-аналіз для {symbol} перервано через помилку валідації ШІ.")
+                
                 await asyncio.sleep(3)
     
-    # Виклик Арбітра Реальності для оновлення статусів угод в БД
     await resolve_open_signals(current_prices_for_memory)
 
 async def main():
-    await init_db() # Ініціалізація бази даних при старті
+    await init_db()
     scheduler.add_job(check_alerts, 'interval', minutes=5)
     scheduler.start()
     await bot.delete_webhook(drop_pending_updates=True) 

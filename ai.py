@@ -2,10 +2,12 @@ import xml.etree.ElementTree as ET
 import aiohttp
 import logging
 import datetime
+import json
 from config import ai_model
+from schemas import TradingVerdict
 
 async def fetch_news(symbol: str = "ETH") -> str:
-    """Ізолюємо мережевий запит. Новини дають макро-контекст."""
+    # Чому: Ізолюємо макро-контекст від мікроструктури для зменшення шуму в прийнятті рішень.
     tags = {"ETH": "ethereum", "BTC": "bitcoin"}
     tag = tags.get(symbol, "cryptocurrency")
     try:
@@ -23,12 +25,12 @@ async def get_ai_forecast(symbol: str, price: float, current_vwap: float, vwap_d
                           rsi_15m: float, macd_hist: float, guide_macd_hist: float, guide_name: str, 
                           news: str, funding_rate: float, cur_vol: float, avg_vol: float,
                           vwap_threshold: float, local_high: float, local_low: float,
-                          total_signals: int, win_rate: float) -> str:
+                          total_signals: int, win_rate: float) -> TradingVerdict | None:
     
     current_time_utc = datetime.datetime.now(datetime.timezone.utc).strftime('%H:%M')
     vol_status = "АНОМАЛЬНИЙ РІСТ" if cur_vol > avg_vol * 1.5 else ("ПАДАЮТЬ" if cur_vol < avg_vol * 0.8 else "В межах норми")
 
-    # Емерджентний блок рефлексії (Балансуючий зворотний зв'язок)
+    # Чому: Балансуючий зворотний зв'язок для контролю просадки капіталу (Drawdown).
     if total_signals >= 3 and win_rate < 40.0:
         reflection_block = f"КРИТИЧНА УВАГА: Твій Win Rate за 24 години впав до {win_rate:.1f}%. Ринок у стадії жорсткого 'запилу' (зняття ліквідності). ТИ ЗОБОВ'ЯЗАНИЙ ПОДВОЇТИ ЖОРСТКІСТЬ ФІЛЬТРІВ. Якщо Risk/Reward не ідеальний — видавай вердикт ПОЗА РИНКОМ."
     elif total_signals >= 3 and win_rate >= 60.0:
@@ -38,7 +40,7 @@ async def get_ai_forecast(symbol: str, price: float, current_vwap: float, vwap_d
 
     prompt = f"""
     Ти — алгоритмічний HFT-аналітик та ризик-менеджер. Твоя спеціалізація — ДЕЙТРЕЙДИНГ.
-    Твоя задача — провести жорсткий математичний аналіз мікроструктури та видати готовий торговий план.
+    Твоя задача — провести жорсткий математичний аналіз мікроструктури та видати готовий торговий план у форматі JSON.
 
     [САМОРЕФЛЕКСІЯ ТА MLOps]:
     {reflection_block}
@@ -60,34 +62,33 @@ async def get_ai_forecast(symbol: str, price: float, current_vwap: float, vwap_d
     - КАРТА ЛІКВІДНОСТІ (UTC):
       * 00:00 - 08:00 (Азія): Низька волатильність, формування меж, хибні пробої.
       * 08:00 - 13:30 (Лондон): Пробудження об'ємів, маніпуляції (зняття стопів), старт трендів.
-      * 13:30 - 21:00 (Нью-Йорк): Висока ліквідність, справжні рухи. (13:30-16:00 - Максимальний об'єм).
+      * 13:30 - 21:00 (Нью-Йорк): Висока ліквідність, справжні рухи.
     
     СВІЖІ НОВИНИ:
     {news}
 
-    СТРОГИЙ АЛГОРИТМ МІРКУВАНЬ (Chain of Thought):
-    1. [Аналіз Сесії]: Оціни ПОТОЧНИЙ ЧАС (UTC). Хто зараз на ринку? Якщо це Азія, будь-які імпульси без новин вважай підозрілими. Якщо це накладання Лондона та Нью-Йорка, довіряй тренду більше.
-    2. [Аналіз Відхилення]: Оціни Відхилення ({vwap_distance_pct:.2f}%). Твій поріг: {vwap_threshold}%.
-    3. [Аналіз Ліквідності]: Оціни Funding та RSI.
-    4. [Математика Ризику (Risk/Reward)]: Це НАЙВАЖЛИВІШИЙ КРОК. 
-       - Потенційний прибуток (Reward) — це завжди повернення до VWAP ({current_vwap:.2f}).
-       - Потенційний збиток (Risk) — це відступ за локальний екстремум (для Лонга СТОП = {local_low:.2f}, для Шорта СТОП = {local_high:.2f}). 
-       - Якщо відстань до Стопа більша, ніж відстань до VWAP (Risk > Reward), ти ЗОБОВ'ЯЗАНИЙ заборонити вхід у ринок.
-    
-    ФОРМАТ ВІДПОВІДІ:
-    **🔍 [Аналіз Мікроструктури та Часу]**: (2-3 речення)
-    **⚖️ [Синтез факторів]**: (2-3 речення)
-    
-    **💡 Intraday-вердикт**: (ЛОНГ / ШОРТ / ПОЗА РИНКОМ)
-
-    (Якщо вердикт ЛОНГ або ШОРТ, ОБОВ'ЯЗКОВО додай наступний блок):
-    🎯 **Тейк-профіт**: {current_vwap:.2f}
-    🛑 **Стоп-лос**: (Вкажи {local_low:.2f} для Лонга або {local_high:.2f} для Шорта)
-    ⏱ **Час життя ідеї (TTL)**: Максимум 3 години.
+    СТРОГИЙ АЛГОРИТМ МІРКУВАНЬ:
+    1. Оціни ПОТОЧНИЙ ЧАС (UTC).
+    2. Оціни Відхилення ({vwap_distance_pct:.2f}%). Поріг: {vwap_threshold}%.
+    3. Оціни Ліквідність (Funding, RSI).
+    4. Математика Ризику: 
+       - Reward = повернення до VWAP ({current_vwap:.2f}).
+       - Risk = відступ за екстремум (Лонг СТОП = {local_low:.2f}, Шорт СТОП = {local_high:.2f}). 
+       - Якщо Risk > Reward, ти ЗОБОВ'ЯЗАНИЙ заборонити вхід у ринок (ПОЗА РИНКОМ).
     """
     try:
-        response = await ai_model.generate_content_async(prompt, generation_config={"temperature": 0.1})
-        return response.text
+        # Чому: Перенесення відповідальності за структуру даних на API гарантує системну стабільність виводу.
+        response = await ai_model.generate_content_async(
+            prompt, 
+            generation_config={
+                "temperature": 0.0,
+                "response_mime_type": "application/json",
+                "response_schema": TradingVerdict
+            }
+        )
+        verdict_data = json.loads(response.text)
+        return TradingVerdict(**verdict_data)
     except Exception as e:
-        logging.error(f"Помилка Gemini API: {e}")
-        return "Нейромережа наразі недоступна."
+        # Чому: Перехоплення помилок валідації Pydantic або мережевих збоїв, захист від крашу основного циклу.
+        logging.error(f"Помилка генерації або валідації JSON ШІ: {e}")
+        return None
