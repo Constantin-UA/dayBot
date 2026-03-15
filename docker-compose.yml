@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  vwap_bot:
+    build: .
+    container_name: daybot_vwap
+    restart: unless-stopped # Эмерджентная надежность: контейнер сам поднимется при краше или рестарте VPS
+    env_file:
+      - .env
+    volumes:
+      # Балансирующий контур памяти: связываем папку data на сервере с папкой data в контейнере
+      - ./data:/app/data

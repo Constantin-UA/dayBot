@@ -2,7 +2,11 @@ import aiosqlite
 import datetime
 import logging
 
-DB_PATH = "trades.db"
+# Было:
+# DB_PATH = "trades.db"
+
+# Стало:
+DB_PATH = "data/trades.db"
 
 async def init_db():
     """Ініціалізація бази даних (Гіпокамп системи)."""
