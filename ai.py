@@ -1,6 +1,7 @@
 import xml.etree.ElementTree as ET
 import aiohttp
 import logging
+import datetime
 from config import ai_model
 
 async def fetch_news(symbol: str = "ETH") -> str:
@@ -26,6 +27,9 @@ async def get_ai_forecast(symbol: str, price: float, current_vwap: float, vwap_d
                           news: str, funding_rate: float, cur_vol: float, avg_vol: float,
                           vwap_threshold: float, local_high: float, local_low: float) -> str:
     
+    # СИСТЕМНА ІНТЕГРАЦІЯ: Зчитуємо поточний час по UTC для синхронізації з біржами
+    current_time_utc = datetime.datetime.now(datetime.timezone.utc).strftime('%H:%M')
+    
     vol_status = "АНОМАЛЬНИЙ РІСТ" if cur_vol > avg_vol * 1.5 else ("ПАДАЮТЬ" if cur_vol < avg_vol * 0.8 else "В межах норми")
 
     prompt = f"""
@@ -44,19 +48,27 @@ async def get_ai_forecast(symbol: str, price: float, current_vwap: float, vwap_d
     - Ставка фінансування (Funding): {funding_rate * 100:.4f}%
     - Поводир ({guide_name}): {'Росте' if guide_macd_hist > 0 else 'Падає'}
     
+    ЧАСОВИЙ КОНТЕКСТ (СИНХРОНІЗАЦІЯ СЕСІЙ):
+    - ПОТОЧНИЙ ЧАС (UTC): {current_time_utc}
+    - КАРТА ЛІКВІДНОСТІ (UTC):
+      * 00:00 - 08:00 (Азія): Низька волатильність, формування меж, хибні пробої.
+      * 08:00 - 13:30 (Лондон): Пробудження об'ємів, маніпуляції (зняття стопів), старт трендів.
+      * 13:30 - 21:00 (Нью-Йорк): Висока ліквідність, справжні рухи. (13:30-16:00 - Максимальний об'єм).
+    
     СВІЖІ НОВИНИ:
     {news}
 
     СТРОГИЙ АЛГОРИТМ МІРКУВАНЬ (Chain of Thought):
-    1. [Аналіз Відхилення]: Оціни Відхилення ({vwap_distance_pct:.2f}%). Твій поріг: {vwap_threshold}%.
-    2. [Аналіз Ліквідності]: Оціни Funding та RSI.
-    3. [Математика Ризику (Risk/Reward)]: Це НАЙВАЖЛИВІШИЙ КРОК. 
+    1. [Аналіз Сесії]: Оціни ПОТОЧНИЙ ЧАС (UTC). Хто зараз на ринку? Якщо це Азія, будь-які імпульси без новин вважай підозрілими (ризик хибного пробою). Якщо це накладання Лондона та Нью-Йорка, довіряй тренду більше.
+    2. [Аналіз Відхилення]: Оціни Відхилення ({vwap_distance_pct:.2f}%). Твій поріг: {vwap_threshold}%.
+    3. [Аналіз Ліквідності]: Оціни Funding та RSI.
+    4. [Математика Ризику (Risk/Reward)]: Це НАЙВАЖЛИВІШИЙ КРОК. 
        - Потенційний прибуток (Reward) — це завжди повернення до VWAP ({current_vwap:.2f}).
        - Потенційний збиток (Risk) — це відступ за локальний екстремум (для Лонга СТОП = {local_low:.2f}, для Шорта СТОП = {local_high:.2f}). 
        - Подумки порівняй ці дистанції. Якщо відстань до Стопа більша, ніж відстань до VWAP (Risk > Reward), ти ЗОБОВ'ЯЗАНИЙ заборонити вхід у ринок.
     
     ФОРМАТ ВІДПОВІДІ:
-    **🔍 [Аналіз Мікроструктури]**: (2-3 речення)
+    **🔍 [Аналіз Мікроструктури та Часу]**: (2-3 речення)
     **⚖️ [Синтез факторів]**: (2-3 речення)
     
     **💡 Intraday-вердикт**: (ЛОНГ / ШОРТ / ПОЗА РИНКОМ)

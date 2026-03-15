@@ -7,4 +7,3 @@ google-generativeai
 aiohttp
 python-dotenv
 apscheduler
-yfinance
