@@ -3,11 +3,11 @@ import aiohttp
 import logging
 import datetime
 import json
-from config import ai_model
+from google.genai import types
+from config import client
 from schemas import TradingVerdict
 
 async def fetch_news(symbol: str = "ETH") -> str:
-    # Чому: Ізолюємо макро-контекст від мікроструктури для зменшення шуму в прийнятті рішень.
     tags = {"ETH": "ethereum", "BTC": "bitcoin"}
     tag = tags.get(symbol, "cryptocurrency")
     try:
@@ -30,7 +30,6 @@ async def get_ai_forecast(symbol: str, price: float, current_vwap: float, vwap_d
     current_time_utc = datetime.datetime.now(datetime.timezone.utc).strftime('%H:%M')
     vol_status = "АНОМАЛЬНИЙ РІСТ" if cur_vol > avg_vol * 1.5 else ("ПАДАЮТЬ" if cur_vol < avg_vol * 0.8 else "В межах норми")
 
-    # Чому: Балансуючий зворотний зв'язок для контролю просадки капіталу (Drawdown).
     if total_signals >= 3 and win_rate < 40.0:
         reflection_block = f"КРИТИЧНА УВАГА: Твій Win Rate за 24 години впав до {win_rate:.1f}%. Ринок у стадії жорсткого 'запилу' (зняття ліквідності). ТИ ЗОБОВ'ЯЗАНИЙ ПОДВОЇТИ ЖОРСТКІСТЬ ФІЛЬТРІВ. Якщо Risk/Reward не ідеальний — видавай вердикт ПОЗА РИНКОМ."
     elif total_signals >= 3 and win_rate >= 60.0:
@@ -77,18 +76,18 @@ async def get_ai_forecast(symbol: str, price: float, current_vwap: float, vwap_d
        - Якщо Risk > Reward, ти ЗОБОВ'ЯЗАНИЙ заборонити вхід у ринок (ПОЗА РИНКОМ).
     """
     try:
-        # Чому: Перенесення відповідальності за структуру даних на API гарантує системну стабільність виводу.
-        response = await ai_model.generate_content_async(
-            prompt, 
-            generation_config={
-                "temperature": 0.0,
-                "response_mime_type": "application/json",
-                "response_schema": TradingVerdict
-            }
+        # Чому: Використання асинхронного інтерфейсу нового SDK (client.aio.models) з конфігурацією структурованого виводу.
+        response = await client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                response_mime_type="application/json",
+                response_schema=TradingVerdict,
+            )
         )
         verdict_data = json.loads(response.text)
         return TradingVerdict(**verdict_data)
     except Exception as e:
-        # Чому: Перехоплення помилок валідації Pydantic або мережевих збоїв, захист від крашу основного циклу.
         logging.error(f"Помилка генерації або валідації JSON ШІ: {e}")
         return None
