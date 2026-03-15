@@ -106,11 +106,12 @@ async def ai_forecast_handler(call: CallbackQuery):
         total_signals=total_sig, win_rate=win_rate
     )
     
-    # Чому: Захист контуру управління (Execution Layer) від нульових покажчиків при падінні ШІ.
+    # Чому: Захист контуру управління від нульових покажчиків при падінні ШІ.
     if verdict_obj is None:
         return await call.message.edit_text("❌ Збій генерації або валідації торгового плану ШІ.")
 
-    if verdict_obj.direction in ["ЛОНГ", "ШОРТ"] and verdict_obj.take_profit and verdict_obj.stop_loss:
+    # Чому: Явна перевірка is not None запобігає втраті даних, якщо стоп-лос дорівнює 0.0
+    if verdict_obj.direction in ["ЛОНГ", "ШОРТ"] and verdict_obj.take_profit is not None and verdict_obj.stop_loss is not None:
         await save_signal(
             symbol=symbol, 
             direction=verdict_obj.direction, 
@@ -173,14 +174,18 @@ async def save_log(message: types.Message, state: FSMContext):
     await wait_msg.delete()
 
 async def check_alerts():
-    current_prices_for_memory = {}
+    # Чому: Перехід від точкових зрізів ціни до передачі повного датафрейму свічок
+    market_dataframes_for_memory = {}
 
     for symbol in WATCHLIST:
         data = await get_market_data(symbol)
         if data[0] is None: continue
         
         price, vwap, vwap_dist_pct, rsi_15m, funding, df_15m, buy_pct, sell_pct, macd_15m, guide_macd, guide_name, cur_vol, avg_vol = data
-        current_prices_for_memory[symbol] = price
+        
+        # Зберігаємо датафрейм (свічки 15m) для Арбітра Реальності
+        market_dataframes_for_memory[symbol] = df_15m
+        
         alert_message, current_alert_type = None, None
 
         is_volume_anomaly = cur_vol > (avg_vol * 2.0)
@@ -222,7 +227,7 @@ async def check_alerts():
                 )
                 
                 if verdict_obj:
-                    if verdict_obj.direction in ["ЛОНГ", "ШОРТ"] and verdict_obj.take_profit and verdict_obj.stop_loss:
+                    if verdict_obj.direction in ["ЛОНГ", "ШОРТ"] and verdict_obj.take_profit is not None and verdict_obj.stop_loss is not None:
                         await save_signal(
                             symbol=symbol, 
                             direction=verdict_obj.direction, 
@@ -248,7 +253,8 @@ async def check_alerts():
                 
                 await asyncio.sleep(3)
     
-    await resolve_open_signals(current_prices_for_memory)
+    # Чому: Виклик Арбітра Реальності 2.0 для аналізу OHLCV-траєкторій
+    await resolve_open_signals(market_dataframes_for_memory)
 
 async def main():
     await init_db()
