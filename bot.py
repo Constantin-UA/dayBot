@@ -7,7 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, logging, VWAP_ALERT_THRESHOLD, WATCHLIST
+from config import BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, logging, VWAP_ALERT_THRESHOLD, WATCHLIST, FIXED_RISK_USD
 from market import get_market_data, create_chart
 from ai import fetch_news, get_ai_forecast
 from memory import init_db, save_signal, resolve_open_signals, get_recent_stats
@@ -106,19 +106,8 @@ async def ai_forecast_handler(call: CallbackQuery):
         total_signals=total_sig, win_rate=win_rate
     )
     
-    # Чому: Захист контуру управління від нульових покажчиків при падінні ШІ.
     if verdict_obj is None:
         return await call.message.edit_text("❌ Збій генерації або валідації торгового плану ШІ.")
-
-    # Чому: Явна перевірка is not None запобігає втраті даних, якщо стоп-лос дорівнює 0.0
-    if verdict_obj.direction in ["ЛОНГ", "ШОРТ"] and verdict_obj.take_profit is not None and verdict_obj.stop_loss is not None:
-        await save_signal(
-            symbol=symbol, 
-            direction=verdict_obj.direction, 
-            entry=price, 
-            tp=verdict_obj.take_profit, 
-            sl=verdict_obj.stop_loss
-        )
 
     ui_text = (
         f"🤖 **Intraday AI ({symbol}):**\n\n"
@@ -126,10 +115,25 @@ async def ai_forecast_handler(call: CallbackQuery):
         f"**⚖️ Синтез:**\n{verdict_obj.synthesis}\n\n"
         f"**💡 Вердикт:** {verdict_obj.direction}\n"
     )
-    
-    if verdict_obj.direction != "ПОЗА РИНКОМ":
+
+    if verdict_obj.direction in ["ЛОНГ", "ШОРТ"] and verdict_obj.take_profit is not None and verdict_obj.stop_loss is not None:
+        # Чому: Конвертація цінової дельти у фізичний об'єм активу для забезпечення фіксованого профілю ризику.
+        risk_per_coin = abs(price - verdict_obj.stop_loss)
+        position_size = FIXED_RISK_USD / risk_per_coin if risk_per_coin > 0 else 0
+        notional_value = position_size * price
+
+        await save_signal(
+            symbol=symbol, 
+            direction=verdict_obj.direction, 
+            entry=price, 
+            tp=verdict_obj.take_profit, 
+            sl=verdict_obj.stop_loss,
+            pos_size=position_size
+        )
         ui_text += f"🎯 **Тейк-профіт**: {verdict_obj.take_profit}\n"
         ui_text += f"🛑 **Стоп-лос**: {verdict_obj.stop_loss}\n"
+        ui_text += f"⚖️ **Об'єм (Position):** `{position_size:.4f} {symbol}` (~${notional_value:.2f})\n"
+        ui_text += f"💸 **Ризик:** `${FIXED_RISK_USD:.2f}`\n"
 
     await call.message.delete()
     await call.message.answer(ui_text, parse_mode="Markdown")
@@ -174,7 +178,6 @@ async def save_log(message: types.Message, state: FSMContext):
     await wait_msg.delete()
 
 async def check_alerts():
-    # Чому: Перехід від точкових зрізів ціни до передачі повного датафрейму свічок
     market_dataframes_for_memory = {}
 
     for symbol in WATCHLIST:
@@ -182,8 +185,6 @@ async def check_alerts():
         if data[0] is None: continue
         
         price, vwap, vwap_dist_pct, rsi_15m, funding, df_15m, buy_pct, sell_pct, macd_15m, guide_macd, guide_name, cur_vol, avg_vol = data
-        
-        # Зберігаємо датафрейм (свічки 15m) для Арбітра Реальності
         market_dataframes_for_memory[symbol] = df_15m
         
         alert_message, current_alert_type = None, None
@@ -227,15 +228,6 @@ async def check_alerts():
                 )
                 
                 if verdict_obj:
-                    if verdict_obj.direction in ["ЛОНГ", "ШОРТ"] and verdict_obj.take_profit is not None and verdict_obj.stop_loss is not None:
-                        await save_signal(
-                            symbol=symbol, 
-                            direction=verdict_obj.direction, 
-                            entry=price, 
-                            tp=verdict_obj.take_profit, 
-                            sl=verdict_obj.stop_loss
-                        )
-
                     ui_text = (
                         f"🤖 **Auto AI ({symbol}):**\n\n"
                         f"**🔍 Мікроструктура:**\n{verdict_obj.analysis}\n\n"
@@ -243,9 +235,23 @@ async def check_alerts():
                         f"**💡 Вердикт:** {verdict_obj.direction}\n"
                     )
                     
-                    if verdict_obj.direction != "ПОЗА РИНКОМ":
+                    if verdict_obj.direction in ["ЛОНГ", "ШОРТ"] and verdict_obj.take_profit is not None and verdict_obj.stop_loss is not None:
+                        risk_per_coin = abs(price - verdict_obj.stop_loss)
+                        position_size = FIXED_RISK_USD / risk_per_coin if risk_per_coin > 0 else 0
+                        notional_value = position_size * price
+
+                        await save_signal(
+                            symbol=symbol, 
+                            direction=verdict_obj.direction, 
+                            entry=price, 
+                            tp=verdict_obj.take_profit, 
+                            sl=verdict_obj.stop_loss,
+                            pos_size=position_size
+                        )
                         ui_text += f"🎯 **Тейк-профіт**: {verdict_obj.take_profit}\n"
                         ui_text += f"🛑 **Стоп-лос**: {verdict_obj.stop_loss}\n"
+                        ui_text += f"⚖️ **Об'єм (Position):** `{position_size:.4f} {symbol}` (~${notional_value:.2f})\n"
+                        ui_text += f"💸 **Ризик:** `${FIXED_RISK_USD:.2f}`\n"
 
                     await bot.send_message(chat_id=ADMIN_ID, text=ui_text, parse_mode="Markdown")
                 else:
@@ -253,7 +259,6 @@ async def check_alerts():
                 
                 await asyncio.sleep(3)
     
-    # Чому: Виклик Арбітра Реальності 2.0 для аналізу OHLCV-траєкторій
     await resolve_open_signals(market_dataframes_for_memory)
 
 async def main():

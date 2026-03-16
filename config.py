@@ -15,6 +15,9 @@ VWAP_ALERT_THRESHOLD = float(os.getenv("VWAP_ALERT_THRESHOLD", 1.0))
 WATCHLIST_RAW = os.getenv("WATCHLIST", "ETH,BTC")
 WATCHLIST = [coin.strip() for coin in WATCHLIST_RAW.split(",")]
 
+# Чому: Фіксація максимально допустимих втрат на одну ітерацію для стабілізації кривої капіталу (Equity Curve).
+FIXED_RISK_USD = float(os.getenv("FIXED_RISK_USD", 10.0))
+
 if not all([BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, GEMINI_API_KEY]):
     raise ValueError("Відсутні токени в .env!")
 
