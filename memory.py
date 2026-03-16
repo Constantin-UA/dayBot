@@ -127,3 +127,35 @@ async def get_recent_stats() -> tuple:
     strict_total = wins + losses
     if strict_total == 0: return total_resolved, 50.0 
     return total_resolved, (wins / strict_total) * 100
+
+async def get_full_statistics() -> dict:
+    """
+    Чому: Ізольована агрегація абсолютних фінансових метрик для формування дашборду.
+    Це дозволяє уникнути навантаження на основний потік прийняття рішень (ai.py).
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT status, pnl FROM signals WHERE status IN ('WIN', 'LOSS', 'BREAKEVEN')"
+        ) as cursor:
+            results = await cursor.fetchall()
+            
+    stats = {
+        "total": len(results),
+        "wins": 0,
+        "losses": 0,
+        "breakevens": 0,
+        "net_pnl": 0.0,
+        "win_rate": 0.0
+    }
+
+    for status, pnl in results:
+        if status == "WIN": stats["wins"] += 1
+        elif status == "LOSS": stats["losses"] += 1
+        elif status == "BREAKEVEN": stats["breakevens"] += 1
+        if pnl: stats["net_pnl"] += pnl
+
+    strict_total = stats["wins"] + stats["losses"]
+    if strict_total > 0:
+        stats["win_rate"] = (stats["wins"] / strict_total) * 100
+
+    return stats

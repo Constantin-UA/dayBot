@@ -3,32 +3,27 @@ import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, logging, VWAP_ALERT_THRESHOLD, WATCHLIST, FIXED_RISK_USD
 from market import get_market_data, create_chart
 from ai import fetch_news, get_ai_forecast
-from memory import init_db, save_signal, resolve_open_signals, get_recent_stats
+from memory import init_db, save_signal, resolve_open_signals, get_recent_stats, get_full_statistics # <-- Додано імпорт
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 alert_state = {} 
 
-class LogState(StatesGroup):
-    waiting_for_note = State()
-
+# Чому: Інтерфейс реструктуровано для виклику кількісного фінансового звіту.
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="⚡ Intraday Radar"), KeyboardButton(text="🧠 AI Скальп")],
-        [KeyboardButton(text="📝 Log")]
+        [KeyboardButton(text="📊 Статистика")]
     ], resize_keyboard=True
 )
 
 def get_asset_keyboard(action_prefix: str) -> InlineKeyboardMarkup:
-    # Чому: DRY-принцип, генерація UI на основі константи з конфігурації.
     buttons = [InlineKeyboardButton(text=coin, callback_data=f"{action_prefix}_{coin}") for coin in WATCHLIST]
     keyboard = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -45,9 +40,27 @@ async def ask_analyze(message: types.Message):
 async def ask_ai(message: types.Message):
     await message.answer("Оберіть актив для Intraday ШІ-прогнозу:", reply_markup=get_asset_keyboard("ai"))
 
-@dp.message(F.text == "📝 Log")
-async def ask_log(message: types.Message):
-    await message.answer("Для якого активу пишемо лог?", reply_markup=get_asset_keyboard("log"))
+@dp.message(F.text == "📊 Статистика")
+async def show_statistics(message: types.Message):
+    """Чому: Пряма трансляція макро-стану системи оператору."""
+    stats = await get_full_statistics()
+    
+    if stats["total"] == 0:
+        return await message.answer("📭 База даних порожня. Немає закритих угод.")
+
+    # Динамічний формат знаку для PnL
+    pnl_sign = "+" if stats['net_pnl'] > 0 else ""
+    
+    text = (
+        f"📊 **Кількісний Фінансовий Звіт**\n\n"
+        f"💼 **Чистий PnL:** `{pnl_sign}${stats['net_pnl']:.2f}`\n"
+        f"🎯 **Win Rate:** `{stats['win_rate']:.1f}%`\n\n"
+        f"📈 Всього закритих угод: `{stats['total']}`\n"
+        f"✅ Прибуткові (WIN): `{stats['wins']}`\n"
+        f"❌ Збиткові (LOSS): `{stats['losses']}`\n"
+        f"🛡 Без збитку (BE): `{stats['breakevens']}`"
+    )
+    await message.answer(text, parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith("market_"))
 async def market_handler(call: CallbackQuery):
@@ -117,7 +130,6 @@ async def ai_forecast_handler(call: CallbackQuery):
     )
 
     if verdict_obj.direction in ["ЛОНГ", "ШОРТ"] and verdict_obj.take_profit is not None and verdict_obj.stop_loss is not None:
-        # Чому: Конвертація цінової дельти у фізичний об'єм активу для забезпечення фіксованого профілю ризику.
         risk_per_coin = abs(price - verdict_obj.stop_loss)
         position_size = FIXED_RISK_USD / risk_per_coin if risk_per_coin > 0 else 0
         notional_value = position_size * price
@@ -137,45 +149,6 @@ async def ai_forecast_handler(call: CallbackQuery):
 
     await call.message.delete()
     await call.message.answer(ui_text, parse_mode="Markdown")
-
-@dp.callback_query(F.data.startswith("log_"))
-async def start_log_process(call: CallbackQuery, state: FSMContext):
-    await call.answer()
-    symbol = call.data.split("_")[1]
-    await state.update_data(symbol=symbol) 
-    await state.set_state(LogState.waiting_for_note)
-    await call.message.delete()
-    await call.message.answer(f"✍️ Опишіть інтрадей-угоду по **{symbol}**:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True))
-
-@dp.message(F.text == "❌ Скасувати", LogState.waiting_for_note)
-async def cancel_log(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Скасовано.", reply_markup=main_keyboard)
-
-@dp.message(LogState.waiting_for_note)
-async def save_log(message: types.Message, state: FSMContext):
-    user_data = await state.get_data()
-    symbol = user_data.get("symbol", "ETH")
-    user_note = message.text
-    
-    wait_msg = await message.answer(f"⏳ Зберігаю лог по {symbol}...")
-    await state.clear()
-    
-    data = await get_market_data(symbol)
-    price, vwap, vwap_dist_pct, rsi_15m, _, df_15m, _, _, _, _, _, _, _ = data
-    
-    chart_buffer = create_chart(df_15m, price, vwap, symbol, "log_chart.png")
-    photo = BufferedInputFile(chart_buffer.getvalue(), filename="log_chart.png")
-
-    log_text = (
-        f"📖 **INTRADAY ЖУРНАЛ ({symbol})** | `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}`\n\n"
-        f"📝 **Запис:**\n_{user_note}_\n\n"
-        f"💰 Ціна: `${price:,.4f}` | VWAP Відхилення: `{vwap_dist_pct:+.2f}%` | RSI 15m: `{rsi_15m:.1f}`"
-    )
-
-    await bot.send_photo(chat_id=LOG_CHANNEL_ID, photo=photo, caption=log_text, parse_mode="Markdown")
-    await message.answer("✅ Збережено в журнал!", reply_markup=main_keyboard)
-    await wait_msg.delete()
 
 async def check_alerts():
     market_dataframes_for_memory = {}
