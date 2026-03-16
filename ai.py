@@ -10,10 +10,20 @@ from schemas import TradingVerdict
 async def fetch_news(symbol: str = "ETH") -> str:
     tags = {"ETH": "ethereum", "BTC": "bitcoin"}
     tag = tags.get(symbol, "cryptocurrency")
+    
+    # Чому: Імітація браузера для обходу базових систем захисту Cloudflare від ботів.
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(f'https://cointelegraph.com/rss/tag/{tag}', timeout=5) as response:
+            async with session.get(f'https://cointelegraph.com/rss/tag/{tag}', headers=headers, timeout=5) as response:
                 xml_data = await response.text()
+                
+                # Чому: Жорсткий фільтр для запобігання падінню парсера XML при отриманні HTML-заглушки.
+                if not xml_data.strip() or "<html" in xml_data.lower():
+                    return "Немає свіжих новин (джерело тимчасово недоступне)."
+                    
                 root = ET.fromstring(xml_data)
                 news = [f"- {item.find('title').text}" for item in root.findall('./channel/item')[:5]]
                 return "\n".join(news)
@@ -76,7 +86,6 @@ async def get_ai_forecast(symbol: str, price: float, current_vwap: float, vwap_d
        - Якщо Risk > Reward, ти ЗОБОВ'ЯЗАНИЙ заборонити вхід у ринок (ПОЗА РИНКОМ).
     """
     try:
-        # Чому: Використання асинхронного інтерфейсу нового SDK (client.aio.models) з конфігурацією структурованого виводу.
         response = await client.aio.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,

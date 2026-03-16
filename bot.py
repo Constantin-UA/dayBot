@@ -12,7 +12,7 @@ from memory import init_db, save_signal, resolve_open_signals, get_recent_stats,
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 alert_state = {} 
-global_dataframes = {} # Чому: Глобальний стан для асинхронного доступу Арбітра Реальності
+global_dataframes = {}
 
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
@@ -117,8 +117,14 @@ async def ai_forecast_handler(call: CallbackQuery):
     )
 
     if verdict_obj.direction in ["ЛОНГ", "ШОРТ"] and verdict_obj.take_profit and verdict_obj.stop_loss:
-        risk_per_coin = abs(price - verdict_obj.stop_loss)
-        position_size = FIXED_RISK_USD / risk_per_coin if risk_per_coin > 0 else 0
+        # Чому: Інтеграція впливу комісії (Fee Impact) у визначення справжнього ризику на монету
+        FEE_RATE = 0.0012
+        price_delta = abs(price - verdict_obj.stop_loss)
+        fee_impact = (price + verdict_obj.stop_loss) * FEE_RATE
+        true_risk_per_coin = price_delta + fee_impact
+        
+        position_size = FIXED_RISK_USD / true_risk_per_coin if true_risk_per_coin > 0 else 0
+        
         await save_signal(symbol, verdict_obj.direction, price, verdict_obj.take_profit, verdict_obj.stop_loss, position_size)
         ui_text += f"🎯 **TP**: {verdict_obj.take_profit} | 🛑 **SL**: {verdict_obj.stop_loss}\n"
         ui_text += f"⚖️ **Об'єм:** `{position_size:.4f} {symbol}` | 💸 **Ризик:** `${FIXED_RISK_USD:.2f}`\n"
@@ -127,8 +133,7 @@ async def ai_forecast_handler(call: CallbackQuery):
     await call.message.answer(ui_text, parse_mode="Markdown")
 
 async def symbol_worker(symbol: str):
-    """Чому: Ізольований кінцевий автомат для безперервного моніторингу активу через WebSockets."""
-    await asyncio.sleep(WATCHLIST.index(symbol)) # Запобігання Rate Limit при старті
+    await asyncio.sleep(WATCHLIST.index(symbol))
     while True:
         try:
             data = await get_market_data(symbol, use_ws=True)
@@ -172,19 +177,24 @@ async def symbol_worker(symbol: str):
                     if verdict_obj:
                         ui_text = f"🤖 **Auto AI ({symbol}):**\n\n**🔍 Мікроструктура:**\n{verdict_obj.analysis}\n\n**⚖️ Синтез:**\n{verdict_obj.synthesis}\n\n**💡 Вердикт:** {verdict_obj.direction}\n"
                         if verdict_obj.direction in ["ЛОНГ", "ШОРТ"] and verdict_obj.take_profit and verdict_obj.stop_loss:
-                            risk_per_coin = abs(price - verdict_obj.stop_loss)
-                            position_size = FIXED_RISK_USD / risk_per_coin if risk_per_coin > 0 else 0
+                            # Чому: Ідентичний розрахунок істинного ризику для фонового контуру
+                            FEE_RATE = 0.0012
+                            price_delta = abs(price - verdict_obj.stop_loss)
+                            fee_impact = (price + verdict_obj.stop_loss) * FEE_RATE
+                            true_risk_per_coin = price_delta + fee_impact
+                            
+                            position_size = FIXED_RISK_USD / true_risk_per_coin if true_risk_per_coin > 0 else 0
+                            
                             await save_signal(symbol, verdict_obj.direction, price, verdict_obj.take_profit, verdict_obj.stop_loss, position_size)
                             ui_text += f"🎯 **TP**: {verdict_obj.take_profit} | 🛑 **SL**: {verdict_obj.stop_loss}\n⚖️ **Об'єм:** `{position_size:.4f} {symbol}` | 💸 **Ризик:** `${FIXED_RISK_USD:.2f}`\n"
                         await bot.send_message(chat_id=ADMIN_ID, text=ui_text, parse_mode="Markdown")
                     await asyncio.sleep(3)
-            await asyncio.sleep(2) # Захист від надмірного споживання ресурсів VPS
+            await asyncio.sleep(2)
         except Exception as e:
             logging.error(f"Worker Error {symbol}: {e}")
             await asyncio.sleep(10)
 
 async def reality_arbitrator():
-    """Чому: Ізольований балансуючий контур для оцінки PnL. Виконується незалежно від збору даних."""
     while True:
         await asyncio.sleep(60) 
         if global_dataframes:
@@ -192,7 +202,6 @@ async def reality_arbitrator():
 
 async def main():
     await init_db()
-    # Запуск незалежних потоків для кожного активу та модуля пам'яті
     asyncio.create_task(reality_arbitrator())
     for symbol in WATCHLIST:
         asyncio.create_task(symbol_worker(symbol))
