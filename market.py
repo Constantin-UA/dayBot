@@ -15,7 +15,7 @@ async def get_market_data(symbol: str = "ETH", period: int = 14, use_ws: bool = 
             # Чому: Подійно-орієнтований збір даних. Метод блокується до отримання оновлень від біржі.
             ticker = await exchange.watch_ticker(symbol_spot)
             order_book = await exchange.watch_order_book(symbol_spot, limit=50)
-            ohlcv_15m = await exchange.watch_ohlcv(symbol_spot, timeframe='15m')
+            ohlcv_15m = await exchange.fetch_ohlcv(symbol_spot, timeframe='15m', limit=150)
         else:
             ticker = await exchange.fetch_ticker(symbol_spot)
             order_book = await exchange.fetch_order_book(symbol_spot, limit=50)
